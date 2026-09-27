@@ -51,8 +51,8 @@ function EarthWarp() {
       if (t >= 1) {
         // Do NOT reset phase here — the auth layout unmounts on navigation.
         // Resetting causes the login page to flash back into view.
-        if (typeof window !== "undefined" && window.location.pathname !== "/") {
-          window.location.href = "/";
+        if (typeof window !== "undefined" && window.location.pathname !== "/dashboard") {
+          window.location.href = "/dashboard";
         }
       }
     }
