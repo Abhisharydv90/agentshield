@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, type FormEvent } from "react";
+import { Suspense, useState, useEffect, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -17,7 +17,8 @@ import { useSynthAudio } from "@/components/auth3d/useSynthAudio";
 import { useAuthFlow } from "@/components/auth3d/useAuthFlow";
 import { HashReveal } from "@/components/auth3d/HashReveal";
 
-export default function LoginPage() {
+/* The inner component — has access to useSearchParams */
+function LoginPageInner() {
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next") ?? "/";
@@ -135,26 +136,24 @@ export default function LoginPage() {
 
   return (
     <div
-      className="relative bg-[#02080c]/85 backdrop-blur-2xl border border-cyan-400/25 p-7 transition-all duration-500"
+      className="relative bg-black/80 backdrop-blur-2xl border border-cyan-400/20 p-7 transition-all duration-500"
       style={{
         transformStyle: "preserve-3d",
         animation: "cardFlip 0.6s cubic-bezier(0.34,1.56,0.64,1)",
-        boxShadow:
-          "0 0 0 1px rgba(34,211,238,0.08), 0 20px 60px -20px rgba(34,211,238,0.35), inset 0 1px 0 0 rgba(103,232,249,0.08)",
       }}
     >
-      <span className="absolute top-0 left-0 w-3 h-3 border-l border-t border-cyan-400/70" />
-      <span className="absolute top-0 right-0 w-3 h-3 border-r border-t border-cyan-400/70" />
-      <span className="absolute bottom-0 left-0 w-3 h-3 border-l border-b border-cyan-400/70" />
-      <span className="absolute bottom-0 right-0 w-3 h-3 border-r border-b border-cyan-400/70" />
+      <span className="absolute top-0 left-0 w-2.5 h-2.5 border-l border-t border-cyan-400/40" />
+      <span className="absolute top-0 right-0 w-2.5 h-2.5 border-r border-t border-cyan-400/40" />
+      <span className="absolute bottom-0 left-0 w-2.5 h-2.5 border-l border-b border-cyan-400/40" />
+      <span className="absolute bottom-0 right-0 w-2.5 h-2.5 border-r border-b border-cyan-400/40" />
 
       <div className="flex items-center gap-2 mb-1">
         <LogIn className="w-4 h-4 text-cyan-400" />
-        <h1 className="text-sm font-mono tracking-[0.3em] uppercase text-cyan-100">
+        <h1 className="text-sm font-mono tracking-[0.28em] uppercase text-slate-300">
           Sign In
         </h1>
       </div>
-      <p className="text-[10px] font-mono text-slate-500 mb-6 leading-relaxed tracking-wider">
+      <p className="text-[10px] font-mono text-slate-600 mb-6 leading-relaxed">
         Authenticate to access your tenant workspace
       </p>
 
@@ -165,7 +164,7 @@ export default function LoginPage() {
             label="deriving key · argon2id"
             progress={hashProgress}
           />
-          <div className="text-[9px] font-mono text-cyan-400/60 leading-relaxed tracking-wider">
+          <div className="text-[9px] font-mono text-slate-600 leading-relaxed">
             {hashProgress >= 1
               ? "▸ querying gateway · sending verification packet"
               : `▸ ${Math.round(hashProgress * 100)}% complete`}
@@ -200,7 +199,7 @@ export default function LoginPage() {
           />
 
           {error && (
-            <div className="flex items-start gap-2 bg-rose-500/10 border border-rose-500/40 px-3 py-2 text-[11px] font-mono text-rose-300 animate-[cardFlip_0.3s_ease-out] tracking-wide">
+            <div className="flex items-start gap-2 bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-[11px] font-mono text-rose-300 animate-[cardFlip_0.3s_ease-out]">
               <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
               <span>{error}</span>
             </div>
@@ -209,8 +208,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading || stage === "hashing" || stage === "verifying"}
-            className="w-full bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-400/50 hover:border-cyan-300 text-cyan-200 py-2.5 text-[11px] font-mono tracking-[0.3em] uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99]"
-            style={{ textShadow: "0 0 12px rgba(34,211,238,0.4)" }}
+            className="w-full bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/50 text-cyan-300 py-2.5 text-[11px] font-mono tracking-[0.25em] uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 hover:scale-[1.01] active:scale-[0.99]"
           >
             {loading ? (
               <>
@@ -229,7 +227,7 @@ export default function LoginPage() {
 
       <div className="flex items-center gap-3 my-5">
         <div className="flex-1 h-px bg-cyan-400/15" />
-        <span className="text-[9px] font-mono tracking-[0.4em] text-slate-600 uppercase">
+        <span className="text-[9px] font-mono tracking-[0.3em] text-slate-700 uppercase">
           or
         </span>
         <div className="flex-1 h-px bg-cyan-400/15" />
@@ -238,13 +236,13 @@ export default function LoginPage() {
       <button
         type="button"
         disabled
-        className="w-full bg-black/40 border border-cyan-400/15 text-slate-500 py-2.5 text-[11px] font-mono tracking-[0.3em] uppercase transition-all disabled:opacity-40 flex items-center justify-center gap-2"
+        className="w-full bg-black/40 border border-cyan-400/20 text-slate-500 py-2.5 text-[11px] font-mono tracking-[0.25em] uppercase transition-all disabled:opacity-40 flex items-center justify-center gap-2"
       >
         <Fingerprint className="w-3.5 h-3.5" />
         Continue with passkey
       </button>
 
-      <div className="mt-6 pt-5 border-t border-cyan-400/10 text-center text-[10px] font-mono tracking-widest text-slate-500">
+      <div className="mt-6 pt-5 border-t border-cyan-400/10 text-center text-[10px] font-mono tracking-wider text-slate-500">
         No account?{" "}
         <Link
           href="/signup"
@@ -254,6 +252,21 @@ export default function LoginPage() {
         </Link>
       </div>
     </div>
+  );
+}
+
+/* The exported page — wraps inner in Suspense for production build */
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="relative bg-black/80 backdrop-blur-2xl border border-cyan-400/20 p-7 h-[400px] flex items-center justify-center">
+          <div className="w-4 h-4 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
+        </div>
+      }
+    >
+      <LoginPageInner />
+    </Suspense>
   );
 }
 
@@ -289,8 +302,8 @@ function Field({
         transform: focused ? "translateZ(20px) translateY(-2px)" : "translateZ(0)",
       }}
     >
-      <label className="flex items-center gap-1.5 text-[9px] font-mono tracking-[0.3em] text-slate-500 uppercase mb-1.5">
-        <span className="text-cyan-400/70">{icon}</span>
+      <label className="flex items-center gap-1.5 text-[9px] font-mono tracking-[0.28em] text-slate-500 uppercase mb-1.5">
+        <span className="text-cyan-500/60">{icon}</span>
         {label}
       </label>
       <input
@@ -302,7 +315,7 @@ function Field({
         placeholder={placeholder}
         autoComplete={autoComplete}
         autoFocus={autoFocus}
-        className={`w-full bg-black/60 border px-3 py-2.5 text-[12px] font-mono text-cyan-100 placeholder:text-slate-700 focus:outline-none transition-all tracking-wide ${
+        className={`w-full bg-black/60 border px-3 py-2.5 text-[12px] font-mono text-slate-200 placeholder:text-slate-700 focus:outline-none transition-all ${
           focused
             ? "border-cyan-400/70 shadow-[0_0_0_4px_rgba(34,211,238,0.12),0_8px_24px_-8px_rgba(34,211,238,0.5)]"
             : "border-cyan-400/20"
