@@ -3,7 +3,6 @@ import type { NextRequest } from "next/server";
 
 const SESSION_COOKIE = "agentshield_session";
 
-// Public routes — no auth required
 const PUBLIC_PATHS = ["/", "/login", "/signup", "/pricing", "/docs", "/about"];
 
 function isPublic(pathname: string): boolean {
@@ -13,10 +12,9 @@ function isPublic(pathname: string): boolean {
   );
 }
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Skip static/internal paths
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/icon") ||
@@ -30,7 +28,6 @@ export function middleware(req: NextRequest) {
   const hasSession = req.cookies.has(SESSION_COOKIE);
   const publicRoute = isPublic(pathname);
 
-  // Protected route + no session → /login
   if (!hasSession && !publicRoute) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
@@ -38,7 +35,6 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Logged in + on login/signup → /dashboard
   if (hasSession && (pathname === "/login" || pathname === "/signup")) {
     const url = req.nextUrl.clone();
     url.pathname = "/dashboard";
