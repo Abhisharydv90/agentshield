@@ -75,14 +75,16 @@ const nextConfig: NextConfig = {
 
   /* --- API proxy: forward /api/* and /v1/* to the FastAPI backend --- */
   async rewrites() {
+    const backend =
+      process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        destination: `${backend}/api/:path*`,
       },
       {
         source: "/v1/:path*",
-        destination: "http://localhost:8000/v1/:path*",
+        destination: `${backend}/v1/:path*`,
       },
     ];
   },
