@@ -1,0 +1,66 @@
+{
+  "name": "agentshield-dashboard",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Enterprise AI firewall operations console — real-time security telemetry, agent policy enforcement, and hash-chain audit explorer.",
+  "author": "AgentShield",
+  "license": "UNLICENSED",
+  "homepage": "https://agentshield.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/agentshield.git"
+  },
+  "keywords": [
+    "ai-security",
+    "agent-firewall",
+    "llm-security",
+    "prompt-injection",
+    "pii-redaction",
+    "zero-trust",
+    "next.js",
+    "3d-dashboard"
+  ],
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "dev:turbo": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "clean": "rimraf .next node_modules/.cache",
+    "analyze": "ANALYZE=true next build",
+    "preview": "next build && next start -p 3000",
+    "verify": "npm run typecheck && npm run lint && npm run build"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.8.1",
+    "lucide-react": "^1.48.0",
+    "next": "16.3.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "^3.10.1",
+    "swr": "^2.5.1",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/three": "^0.186.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.6",
+    "prettier": "^3.3.3",
+    "prettier-plugin-tailwindcss": "^0.6.8",
+    "rimraf": "^6.0.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
