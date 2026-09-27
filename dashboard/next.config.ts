@@ -29,7 +29,7 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   compress: true,
   productionBrowserSourceMaps: false,
-  output: "standalone",
+  
 
   /* --- Build strictness --- */
   typescript: {
