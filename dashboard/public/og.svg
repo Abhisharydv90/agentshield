@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <radialGradient id="ogGlow" cx="20%" cy="20%" r="80%">
+      <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#000000"/>
+  <rect width="1200" height="630" fill="url(#ogGlow)"/>
+
+  <!-- A mark -->
+  <g transform="translate(60, 60)">
+    <path d="M0 60 L30 0 L60 60 L48 60 L30 24 L12 60 Z" fill="#ffffff"/>
+    <rect x="20" y="42" width="20" height="4" fill="#7dd3fc"/>
+  </g>
+  <text x="140" y="112" font-family="Georgia, serif" font-style="italic"
+        font-size="44" fill="#ffffff" letter-spacing="-1">
+    AgentShield
+  </text>
+
+  <!-- Headline -->
+  <text x="60" y="300" font-family="Georgia, serif"
+        font-size="88" font-weight="400" letter-spacing="-2.5" fill="#ffffff">
+    Every agent action,
+  </text>
+  <text x="60" y="400" font-family="Georgia, serif" font-style="italic"
+        font-size="88" font-weight="400" letter-spacing="-2.5" fill="#7dd3fc">
+    audited.
+  </text>
+
+  <!-- Subtitle -->
+  <text x="60" y="460" font-family="ui-monospace, monospace"
+        font-size="20" fill="#8a8f98">
+    Zero-trust security for AI agents.
+  </text>
+
+  <!-- Footer -->
+  <text x="60" y="570" font-family="ui-monospace, monospace"
+        font-size="16" letter-spacing="2" fill="#8a8f98">
+    AGENTSHIELD.APP
+  </text>
+</svg>
