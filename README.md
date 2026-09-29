@@ -14,7 +14,14 @@ Change one line of code. Ship AI agents. Sleep at night.
 [![Postgres](https://img.shields.io/badge/Postgres-16-4169E1?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-UNLICENSED-666?style=flat-square)](#license)
 
-[Live Demo](https://agentshield.vercel.app) · [Features](#features) · [Architecture](#architecture) · [Quickstart](#quickstart)
+## 🔴 Live
+
+**Frontend**: [https://agentshield-woad.vercel.app](https://agentshield-woad.vercel.app)
+**Backend**: [https://agentshield-production-0091.up.railway.app](https://agentshield-production-0091.up.railway.app)
+
+Sign up, get your API key, and point your agent at the gateway — takes 60 seconds.
+
+[Features](#features) · [Architecture](#architecture) · [Quickstart](#quickstart)
 
 </div>
 
