@@ -408,7 +408,7 @@ async def signup(req: SignupRequest, request: Request, response: Response) -> di
         session.add(user)
         await session.flush()
 
-        # Issue the tenant's first API key
+                # Issue the tenant's first API key
         raw_key = generate_key(live=False)
         api_key = APIKey(
             tenant_id=tenant.tenant_id,
@@ -417,17 +417,39 @@ async def signup(req: SignupRequest, request: Request, response: Response) -> di
             key_hash=hash_key(raw_key),
         )
         session.add(api_key)
+        await session.flush()
+
+        # Issue email verification token in the same transaction
+        verify_raw = await _issue_token(
+            session,
+            user.user_id,
+            "email_verification",
+            ttl_seconds=settings.EMAIL_VERIFICATION_TTL_HOURS * 3600,
+            request_ip=meta["ip"],
+        )
+        user_name = user.name
+        user_email = user.email
+
         await session.commit()
 
         user_payload = _user_payload(user, tenant)
 
-    # Audit log (best effort)
+        # Audit log (best effort)
     await _write_auth_event(
         tenant_id=tenant.tenant_id,
         category="other",
         action="allowed",
         reasoning=f"signup: {meta['ip']} · {meta['user_agent'][:60]}",
     )
+
+    # Send verification email (best effort — never blocks signup)
+    verify_url = f"{settings.APP_BASE_URL}/verify-email?token={verify_raw}"
+    html, text = email_verification_email(user_name, verify_url)
+    send_email(user_email, "Verify your AgentShield email", html, text)
+
+    # Session cookie
+    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
+    _set_session_cookie(response, token)
 
     # Session cookie
     token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
@@ -460,7 +482,7 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         if user.status != "active":
             raise HTTPException(status_code=403, detail=f"account_{user.status}")
 
-                # --- Account lockout ---
+        # --- Account lockout ---
         now = datetime.now(timezone.utc)
 
         # Already locked? Reject before touching the password hash.
