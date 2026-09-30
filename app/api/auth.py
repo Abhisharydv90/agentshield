@@ -28,18 +28,24 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from email_validator import validate_email, EmailNotValidError
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import settings
 from app.db.session import async_session
-from app.db.models import User, Tenant, APIKey, TOTPCredential
+from app.db.models import User, Tenant, APIKey, TOTPCredential, AuthToken
+from app.email.sender import send_email
+from app.email.templates import (
+    password_reset_email,
+    email_verification_email,
+)
 from app.security.passwords import hash_password, verify_password, needs_rehash
 from app.security.sessions import (
     create_session_token,
@@ -174,6 +180,7 @@ def _user_payload(user: User, tenant: Tenant) -> dict[str, Any]:
         "name": user.name,
         "role": user.role,
         "tenant_slug": tenant.slug,
+        "email_verified": user.email_verified,
     }
 
 
@@ -206,6 +213,74 @@ async def _resolve_session(request: Request) -> tuple[User, Tenant]:
 
     return user, tenant
 
+# ============================================================
+# Auth token helpers (password reset + email verification)
+# ============================================================
+
+def _generate_token() -> str:
+    """Cryptographically random URL-safe token — 43 chars, ~256 bits."""
+    return secrets.token_urlsafe(32)
+
+
+def _hash_token(raw: str) -> str:
+    """SHA-256 hex digest of a raw token. Only this is stored."""
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+async def _issue_token(
+    session,
+    user_id: uuid.UUID,
+    kind: str,
+    ttl_seconds: int,
+    request_ip: str | None = None,
+) -> str:
+    """Create and persist a token. Returns the raw value (shown once)."""
+    raw = _generate_token()
+    session.add(AuthToken(
+        user_id=user_id,
+        kind=kind,
+        token_hash=_hash_token(raw),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+        request_ip=request_ip,
+    ))
+    await session.commit()
+    return raw
+
+
+async def _consume_token(session, raw: str, kind: str) -> AuthToken | None:
+    """Find, validate, and mark-used a token. None if invalid/expired/used."""
+    tok = (
+        await session.execute(
+            select(AuthToken).where(
+                AuthToken.token_hash == _hash_token(raw),
+                AuthToken.kind == kind,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if tok is None or tok.used_at is not None:
+        return None
+    if tok.expires_at < datetime.now(timezone.utc):
+        return None
+
+    tok.used_at = datetime.now(timezone.utc)
+    return tok
+
+
+async def _invalidate_other_tokens(
+    session, user_id: uuid.UUID, kind: str, keep_id: uuid.UUID
+) -> None:
+    """Mark all other unused tokens of this kind as consumed."""
+    await session.execute(
+        update(AuthToken)
+        .where(
+            AuthToken.user_id == user_id,
+            AuthToken.kind == kind,
+            AuthToken.used_at.is_(None),
+            AuthToken.token_id != keep_id,
+        )
+        .values(used_at=datetime.now(timezone.utc))
+    )
 
 # ============================================================
 # Schemas
@@ -264,6 +339,39 @@ class UserOut(BaseModel):
     name: str
     role: str
     tenant_slug: str
+    email_verified: bool
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def _email_ok(cls, v: str) -> str:
+        return _validate_email_value(v)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+    @field_validator("new_password")
+    @classmethod
+    def _password_ok(cls, v: str) -> str:
+        return _validate_password_strength(v)
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def _email_ok(cls, v: str) -> str:
+        return _validate_email_value(v)
 
 
 # ============================================================
@@ -352,8 +460,60 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         if user.status != "active":
             raise HTTPException(status_code=403, detail=f"account_{user.status}")
 
+                # --- Account lockout ---
+        now = datetime.now(timezone.utc)
+
+        # Already locked? Reject before touching the password hash.
+        if user.locked_until is not None and user.locked_until > now:
+            remaining_min = int(
+                (user.locked_until - now).total_seconds() / 60
+            ) + 1
+            await _write_auth_event(
+                tenant_id=user.tenant_id,
+                category="other",
+                action="blocked",
+                reasoning=(
+                    f"login_locked: {meta['ip']} · {remaining_min}m remaining"
+                ),
+            )
+            raise HTTPException(
+                status_code=423,
+                detail=f"account_locked_try_again_in_{remaining_min}_minutes",
+            )
+
         if not verify_password(req.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="invalid_credentials")
+            user.failed_login_attempts += 1
+
+            if user.failed_login_attempts >= settings.LOCKOUT_THRESHOLD:
+                user.locked_until = now + timedelta(
+                    minutes=settings.LOCKOUT_DURATION_MINUTES
+                )
+                await session.commit()
+                await _write_auth_event(
+                    tenant_id=user.tenant_id,
+                    category="other",
+                    action="blocked",
+                    reasoning=(
+                        f"account_locked: {meta['ip']} · "
+                        f"{user.failed_login_attempts} attempts"
+                    ),
+                )
+                raise HTTPException(
+                    status_code=423,
+                    detail=(
+                        f"account_locked_for_"
+                        f"{settings.LOCKOUT_DURATION_MINUTES}_minutes"
+                    ),
+                )
+
+            await session.commit()
+            raise HTTPException(
+                status_code=401, detail="invalid_credentials"
+            )
+
+        # --- Success — clear counters ---
+        user.failed_login_attempts = 0
+        user.locked_until = None
 
         # Opportunistically upgrade old password hashes
         if needs_rehash(user.password_hash):
@@ -648,3 +808,160 @@ async def complete_2fa(
     _set_session_cookie(response, token)
 
     return {"user": user_payload, "requires_2fa": False}
+
+# ============================================================
+# Password reset
+# ============================================================
+
+@router.post("/forgot-password")
+async def forgot_password(
+    req: ForgotPasswordRequest, request: Request
+) -> dict:
+    """
+    Send a password reset email. Always returns ok — never leaks
+    whether an email is registered.
+    """
+    meta = _client_meta(request)
+
+    async with async_session() as session:
+        user = (
+            await session.execute(select(User).where(User.email == req.email))
+        ).scalar_one_or_none()
+
+        if user is None or user.status != "active":
+            return {"ok": True}
+
+        raw = await _issue_token(
+            session,
+            user.user_id,
+            "password_reset",
+            ttl_seconds=settings.PASSWORD_RESET_TTL_MINUTES * 60,
+            request_ip=meta["ip"],
+        )
+        user_name = user.name
+        user_email = user.email
+        user_tenant_id = user.tenant_id
+
+    reset_url = f"{settings.APP_BASE_URL}/reset-password?token={raw}"
+    html, text = password_reset_email(user_name, reset_url)
+    send_email(user_email, "Reset your AgentShield password", html, text)
+
+    await _write_auth_event(
+        tenant_id=user_tenant_id,
+        category="other",
+        action="allowed",
+        reasoning=f"password_reset_requested: {meta['ip']}",
+    )
+
+    return {"ok": True}
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest) -> dict:
+    async with async_session() as session:
+        tok = await _consume_token(session, req.token, "password_reset")
+        if tok is None:
+            raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+
+        user = await session.get(User, tok.user_id)
+        if user is None or user.status != "active":
+            raise HTTPException(status_code=400, detail="invalid_token")
+
+        user.password_hash = hash_password(req.new_password)
+        # Clear lockout — user proved email control.
+        user.failed_login_attempts = 0
+        user.locked_until = None
+
+        await _invalidate_other_tokens(
+            session, user.user_id, "password_reset", tok.token_id
+        )
+        await session.commit()
+
+        tenant_id = user.tenant_id
+
+    await _write_auth_event(
+        tenant_id=tenant_id,
+        category="other",
+        action="allowed",
+        reasoning="password_reset_completed",
+    )
+
+    return {"ok": True}
+
+
+# ============================================================
+# Email verification
+# ============================================================
+
+@router.post("/verify-email")
+async def verify_email(req: VerifyEmailRequest) -> dict:
+    async with async_session() as session:
+        tok = await _consume_token(session, req.token, "email_verification")
+        if tok is None:
+            raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+
+        user = await session.get(User, tok.user_id)
+        if user is None:
+            raise HTTPException(status_code=400, detail="invalid_token")
+
+        user.email_verified = True
+        await session.commit()
+        tenant_id = user.tenant_id
+
+    await _write_auth_event(
+        tenant_id=tenant_id,
+        category="other",
+        action="allowed",
+        reasoning="email_verified",
+    )
+
+    return {"ok": True}
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    req: ResendVerificationRequest, request: Request
+) -> dict:
+    """
+    Resend the verification email. Rate-limited to one per minute per user;
+    always returns ok to prevent enumeration.
+    """
+    async with async_session() as session:
+        user = (
+            await session.execute(select(User).where(User.email == req.email))
+        ).scalar_one_or_none()
+
+        if user is None or user.status != "active" or user.email_verified:
+            return {"ok": True}
+
+        # Rate limit: refuse if a fresh unused token exists from <60s ago
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+        recent = (
+            await session.execute(
+                select(AuthToken).where(
+                    AuthToken.user_id == user.user_id,
+                    AuthToken.kind == "email_verification",
+                    AuthToken.used_at.is_(None),
+                    AuthToken.created_at > cutoff,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if recent is not None:
+            return {"ok": True}
+
+        raw = await _issue_token(
+            session,
+            user.user_id,
+            "email_verification",
+            ttl_seconds=settings.EMAIL_VERIFICATION_TTL_HOURS * 3600,
+            request_ip=request.client.host if request.client else None,
+        )
+        user_name = user.name
+        user_email = user.email
+
+    verify_url = f"{settings.APP_BASE_URL}/verify-email?token={raw}"
+    html, text = email_verification_email(user_name, verify_url)
+    send_email(user_email, "Verify your AgentShield email", html, text)
+
+    return {"ok": True}

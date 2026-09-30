@@ -108,7 +108,8 @@ type View =
   | "audit"
   | "agents"
   | "webhooks"
-  | "settings";
+  | "settings"
+  | "docs";
 
 type DynamicArc = {
   id: string;
@@ -3434,6 +3435,594 @@ function SettingsPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) 
   );
 }
 
+function VerifyEmailBanner({
+  email,
+  onToast,
+}: {
+  email: string;
+  onToast: (t: Omit<Toast, "id">) => void;
+}) {
+  const [hidden, setHidden] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  if (hidden) return null;
+
+  async function resend() {
+    setSending(true);
+    try {
+      await apiFetch("/api/auth/resend-verification", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      onToast({
+        kind: "success",
+        title: "Verification email sent",
+        description: "Check your inbox",
+      });
+    } catch {
+      onToast({ kind: "error", title: "Failed to resend" });
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="absolute top-14 left-[88px] right-0 z-20 pointer-events-auto">
+      <div className="bg-amber-500/10 border-b border-amber-500/30 px-6 py-2 flex items-center gap-3">
+        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+        <span className="text-[10px] font-mono text-amber-300 tracking-wide flex-1">
+          Verify your email to unlock audit exports, webhook notifications,
+          and policy sync.
+        </span>
+        <button
+          onClick={resend}
+          disabled={sending}
+          className="text-[9px] font-mono tracking-widest uppercase text-amber-400 hover:text-amber-300 border border-amber-500/40 px-2 py-0.5 transition-colors disabled:opacity-50"
+        >
+          {sending ? "Sending…" : "Resend"}
+        </button>
+        <button
+          onClick={() => setHidden(true)}
+          className="text-amber-500/60 hover:text-amber-400 transition-colors"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   SECTION 11b — Documentation page
+   ============================================================ */
+
+type DocSection = {
+  id: string;
+  label: string;
+  group: "Getting Started" | "Core Concepts" | "API Reference" | "Security";
+};
+
+const DOC_SECTIONS: DocSection[] = [
+  { id: "quickstart", label: "Quickstart", group: "Getting Started" },
+  { id: "auth", label: "Authentication", group: "Getting Started" },
+  { id: "pipeline", label: "How It Works", group: "Core Concepts" },
+  { id: "policy", label: "Policy DSL", group: "Core Concepts" },
+  { id: "judge", label: "LLM Judge", group: "Core Concepts" },
+  { id: "chat-api", label: "Chat Completions", group: "API Reference" },
+  { id: "tenant-api", label: "Tenant API", group: "API Reference" },
+  { id: "webhooks", label: "Webhooks", group: "API Reference" },
+  { id: "errors", label: "Error Codes", group: "API Reference" },
+  { id: "threat-model", label: "Threat Model", group: "Security" },
+];
+
+function CodeBlock({ language, code }: { language: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="relative bg-black/80 border border-emerald-500/15 my-3">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-emerald-500/10 bg-black/60">
+        <span className="text-[8px] font-mono tracking-widest text-slate-600 uppercase">
+          {language}
+        </span>
+        <button
+          onClick={async () => {
+            await navigator.clipboard.writeText(code);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+          className="text-[8px] font-mono tracking-widest text-slate-500 hover:text-emerald-400 uppercase transition-colors flex items-center gap-1"
+        >
+          {copied ? (
+            <>
+              <CheckCircle2 className="w-2.5 h-2.5" /> Copied
+            </>
+          ) : (
+            <>
+              <Copy className="w-2.5 h-2.5" /> Copy
+            </>
+          )}
+        </button>
+      </div>
+      <pre className="p-3 overflow-x-auto text-[10px] font-mono leading-relaxed text-slate-300">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+function DocSection({
+  id,
+  title,
+  children,
+}: {
+  id: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section id={`doc-${id}`} className="scroll-mt-4 mb-10">
+      <h3 className="text-[12px] font-mono tracking-[0.2em] text-emerald-400 uppercase mb-3 pb-2 border-b border-emerald-500/15">
+        {title}
+      </h3>
+      <div className="space-y-3 text-[11px] font-mono text-slate-400 leading-relaxed">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function EndpointRow({ method, path, desc }: { method: string; path: string; desc: string }) {
+  const colors: Record<string, string> = {
+    GET: "#38bdf8",
+    POST: "#10b981",
+    PATCH: "#f59e0b",
+    DELETE: "#f43f5e",
+  };
+  return (
+    <div className="flex items-start gap-3 py-2 border-b border-emerald-500/5 last:border-0">
+      <span
+        className="text-[9px] font-mono font-bold tracking-wider px-1.5 py-0.5 border shrink-0 mt-0.5"
+        style={{
+          color: colors[method] ?? "#64748b",
+          borderColor: `${colors[method] ?? "#64748b"}55`,
+          background: `${colors[method] ?? "#64748b"}10`,
+          minWidth: 48,
+          textAlign: "center",
+        }}
+      >
+        {method}
+      </span>
+      <code className="text-[10px] font-mono text-slate-300 shrink-0">{path}</code>
+      <span className="text-[10px] font-mono text-slate-500 ml-auto text-right">
+        {desc}
+      </span>
+    </div>
+  );
+}
+
+function DocsPage() {
+  const [active, setActive] = useState("quickstart");
+
+  function scrollTo(id: string) {
+    setActive(id);
+    const el = document.getElementById(`doc-${id}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  const groups = DOC_SECTIONS.reduce<Record<string, DocSection[]>>((acc, s) => {
+    (acc[s.group] ||= []).push(s);
+    return acc;
+  }, {});
+
+  return (
+    <div className="absolute inset-0 left-[88px] top-16 bottom-8 pointer-events-auto z-20 overflow-hidden flex">
+      {/* Left rail — in-page nav */}
+      <aside className="w-[210px] shrink-0 border-r border-emerald-500/10 overflow-y-auto py-6 pl-6 pr-3">
+        <div className="mb-4">
+          <div className="text-[9px] font-mono tracking-[0.28em] text-slate-500 uppercase">
+            Documentation
+          </div>
+          <div className="text-[9px] font-mono text-slate-700 mt-0.5">
+            AgentShield v0.2.0
+          </div>
+        </div>
+        {Object.entries(groups).map(([group, items]) => (
+          <div key={group} className="mb-4">
+            <div className="text-[8px] font-mono tracking-[0.25em] text-slate-700 uppercase mb-1.5">
+              {group}
+            </div>
+            {items.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => scrollTo(s.id)}
+                className={`block w-full text-left py-1 text-[10px] font-mono tracking-wide transition-colors ${
+                  active === s.id
+                    ? "text-emerald-400"
+                    : "text-slate-500 hover:text-slate-300"
+                }`}
+              >
+                {active === s.id && <span className="mr-1.5 text-emerald-500">▸</span>}
+                {s.label}
+              </button>
+            ))}
+          </div>
+        ))}
+      </aside>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-8 py-6">
+        <div className="max-w-3xl">
+          <div className="mb-8">
+            <h2 className="text-lg font-mono tracking-wider text-slate-100">
+              AgentShield Documentation
+            </h2>
+            <p className="text-[11px] font-mono text-slate-500 mt-1 leading-relaxed">
+              Zero-trust proxy for AI agents. Drop-in OpenAI-compatible API,
+              four-layer defense pipeline, tamper-evident audit trail.
+            </p>
+          </div>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="quickstart" title="Quickstart">
+            <p>
+              Point your existing OpenAI SDK at the gateway. No code changes
+              beyond the base URL and API key.
+            </p>
+            <ol className="list-decimal list-inside space-y-1 text-slate-400 pl-1">
+              <li>Create an API key: <span className="text-emerald-400">Settings → API Keys → New key</span></li>
+              <li>Copy the key (shown once)</li>
+              <li>Swap <code className="text-cyan-400">base_url</code> to the gateway</li>
+            </ol>
+            <CodeBlock
+              language="python"
+              code={`from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://agentshield.app/v1",
+    api_key="ask_live_...",       # your key from Settings
+)
+
+response = client.chat.completions.create(
+    model="openai/gpt-oss-120b",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(response.choices[0].message.content)`}
+            />
+            <p className="text-slate-500">
+              Or with cURL — the trace ID comes back in the response headers:
+            </p>
+            <CodeBlock
+              language="bash"
+              code={`curl -X POST https://agentshield.app/v1/chat/completions \\
+  -H "Authorization: Bearer ask_live_..." \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "openai/gpt-oss-120b",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'`}
+            />
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="auth" title="Authentication">
+            <p>
+              Two auth surfaces. The <span className="text-emerald-400">gateway API</span> uses
+              bearer keys. The <span className="text-emerald-400">dashboard</span> uses
+              session cookies + TOTP for enrolled users.
+            </p>
+            <div className="border border-emerald-500/10 p-3 my-3">
+              <div className="text-[9px] font-mono tracking-widest text-slate-600 uppercase mb-1.5">
+                Gateway API
+              </div>
+              <p className="text-slate-400 mb-1">
+                Send your key in the <code className="text-cyan-400">Authorization</code> header:
+              </p>
+              <code className="text-[10px] font-mono text-emerald-300">
+                Authorization: Bearer ask_live_&lt;32 hex&gt;
+              </code>
+              <p className="text-slate-500 mt-2 text-[10px]">
+                Keys are SHA-256 hashed at rest. We can't recover a lost key — revoke and issue a new one.
+              </p>
+            </div>
+            <div className="border border-emerald-500/10 p-3 my-3">
+              <div className="text-[9px] font-mono tracking-widest text-slate-600 uppercase mb-1.5">
+                Dashboard
+              </div>
+              <p className="text-slate-400">
+                httpOnly session cookie, CSRF-protected, optional TOTP second factor.
+                Configure 2FA at{" "}
+                <a href="/settings/security" className="text-emerald-400 hover:underline">
+                  /settings/security
+                </a>
+                .
+              </p>
+            </div>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="pipeline" title="How It Works">
+            <p>
+              Every inbound request flows through four layers. Cheapest checks
+              run first; expensive ones only see what survives.
+            </p>
+            <div className="grid grid-cols-4 gap-2 my-3">
+              {[
+                { n: "1", label: "Inbound Scan", desc: "Injection patterns", color: "#38bdf8" },
+                { n: "2", label: "PII Redaction", desc: "Reversible tokens", color: "#a78bfa" },
+                { n: "3", label: "Policy Engine", desc: "Deterministic rules", color: "#f59e0b" },
+                { n: "4", label: "LLM Judge", desc: "Semantic verdict", color: "#10b981" },
+              ].map((s) => (
+                <div
+                  key={s.n}
+                  className="relative border p-2.5"
+                  style={{ borderColor: `${s.color}44` }}
+                >
+                  <CornerBrackets />
+                  <div className="text-[8px] font-mono tracking-widest text-slate-700 mb-1">
+                    LAYER {s.n}
+                  </div>
+                  <div
+                    className="text-[10px] font-mono font-bold mb-0.5"
+                    style={{ color: s.color }}
+                  >
+                    {s.label}
+                  </div>
+                  <div className="text-[9px] font-mono text-slate-500 leading-snug">
+                    {s.desc}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-slate-500">
+              Outbound tool calls get the same treatment — the streaming gate
+              reassembles split SSE tool-call deltas, then runs the full
+              circuit-breaker pipeline before anything executes.
+            </p>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="policy" title="Policy DSL">
+            <p>
+              Policies are ordered rule sets. First match wins. If no rule
+              matches, the policy default applies (always{" "}
+              <code className="text-rose-400">deny</code> by default).
+            </p>
+            <CodeBlock
+              language="json"
+              code={`{
+  "rules": [
+    {
+      "tool_pattern": "db.query",
+      "op": "read",
+      "target_allowlist": ["billing_*"],
+      "target_denylist": ["users"],
+      "decision": "allow"
+    },
+    {
+      "tool_pattern": "db.execute",
+      "op": "write",
+      "target_allowlist": ["billing_invoices"],
+      "decision": "step_up"
+    },
+    { "tool_pattern": "*", "decision": "deny" }
+  ]
+}`}
+            />
+            <div className="border border-emerald-500/10 p-3 mt-3">
+              <div className="text-[9px] font-mono tracking-widest text-slate-600 uppercase mb-2">
+                Rule fields
+              </div>
+              <div className="space-y-1 text-[10px] font-mono">
+                <div className="flex gap-3"><code className="text-cyan-400 w-40">tool_pattern</code><span className="text-slate-500">fnmatch glob — <code>db.*</code>, <code>*</code></span></div>
+                <div className="flex gap-3"><code className="text-cyan-400 w-40">op</code><span className="text-slate-500">read | write | delete | execute | external_call</span></div>
+                <div className="flex gap-3"><code className="text-cyan-400 w-40">target_allowlist</code><span className="text-slate-500">globs that must match the target</span></div>
+                <div className="flex gap-3"><code className="text-cyan-400 w-40">target_denylist</code><span className="text-slate-500">globs that force deny regardless</span></div>
+                <div className="flex gap-3"><code className="text-cyan-400 w-40">decision</code><span className="text-slate-500">allow | deny | step_up</span></div>
+              </div>
+            </div>
+            <p className="text-slate-500">
+              <code className="text-amber-400">step_up</code> pauses execution
+              and requires human approval before the tool runs. Use it for
+              high-blast-radius operations like outbound email or payments.
+            </p>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="judge" title="LLM Judge">
+            <p>
+              The judge is the last line of defense — a second LLM evaluates
+              every tool call that passed the deterministic policy engine. It
+              catches semantic threats the rule engine can't express:
+              data exfiltration, prompt smuggling inside tool arguments,
+              privilege escalation chains.
+            </p>
+            <p>
+              <span className="text-emerald-400">Fail-closed by design.</span>{" "}
+              If the judge errors, times out, or returns malformed JSON after
+              3 retries, the call is denied. There is no "fail-open" mode.
+            </p>
+            <div className="border border-rose-500/20 p-3 my-3 bg-rose-500/5">
+              <div className="text-[9px] font-mono tracking-widest text-rose-400 uppercase mb-1">
+                Kill switch
+              </div>
+              <p className="text-[10px] font-mono text-slate-400">
+                Set <code className="text-rose-300">KILL_JUDGE=true</code> in
+                the environment to bypass the LLM judge entirely. Policy engine
+                still runs. Use only for debugging.
+              </p>
+            </div>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="chat-api" title="Chat Completions">
+            <EndpointRow method="POST" path="/v1/chat/completions" desc="OpenAI-compatible" />
+            <p className="mt-3">
+              Fully compatible with the OpenAI Chat Completions spec. Streaming
+              (<code className="text-cyan-400">stream: true</code>) and tool
+              calls (<code className="text-cyan-400">tools</code>) are both
+              supported. Tool calls are intercepted before execution — your
+              client receives a judgment verdict alongside every approved call.
+            </p>
+            <p className="text-slate-500">
+              Response headers include{" "}
+              <code className="text-cyan-400">X-Trace-Id</code> (correlation for
+              audit lookups) and <code className="text-cyan-400">X-Response-Time</code>.
+            </p>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="tenant-api" title="Tenant API">
+            <p>
+              Dashboard-backing endpoints. All scoped to the authenticated tenant.
+            </p>
+            <div className="border border-emerald-500/10 p-3 mt-2">
+              <EndpointRow method="GET" path="/api/tenant/me" desc="Tenant metadata" />
+              <EndpointRow method="GET" path="/api/tenant/settings" desc="Gateway config" />
+              <EndpointRow method="PATCH" path="/api/tenant/settings" desc="Update config" />
+              <EndpointRow method="GET" path="/api/tenant/api-keys" desc="List keys" />
+              <EndpointRow method="POST" path="/api/tenant/api-keys" desc="Create key" />
+              <EndpointRow method="DELETE" path="/api/tenant/api-keys/:id" desc="Revoke" />
+              <EndpointRow method="GET" path="/api/tenant/agents" desc="List agents" />
+              <EndpointRow method="POST" path="/api/tenant/agents" desc="Register" />
+              <EndpointRow method="PATCH" path="/api/tenant/agents/:id" desc="Update" />
+              <EndpointRow method="DELETE" path="/api/tenant/agents/:id" desc="Delete" />
+              <EndpointRow method="GET" path="/api/tenant/policies" desc="List policies" />
+              <EndpointRow method="POST" path="/api/tenant/policies" desc="Create" />
+              <EndpointRow method="PATCH" path="/api/tenant/policies/:id" desc="Update" />
+              <EndpointRow method="DELETE" path="/api/tenant/policies/:id" desc="Delete" />
+              <EndpointRow method="GET" path="/api/tenant/webhooks" desc="List webhooks" />
+              <EndpointRow method="POST" path="/api/tenant/webhooks" desc="Create" />
+              <EndpointRow method="PATCH" path="/api/tenant/webhooks/:id" desc="Update" />
+              <EndpointRow method="DELETE" path="/api/tenant/webhooks/:id" desc="Delete" />
+            </div>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="webhooks" title="Webhooks">
+            <p>
+              Subscribe to security events. Every delivery is signed with
+              HMAC-SHA256 so your endpoint can verify authenticity.
+            </p>
+            <div className="border border-emerald-500/10 p-3 my-3">
+              <div className="text-[9px] font-mono tracking-widest text-slate-600 uppercase mb-2">
+                Events
+              </div>
+              <div className="space-y-1 text-[10px] font-mono">
+                <div className="flex gap-2"><Badge color="#f43f5e">blocked</Badge><span className="text-slate-500">threat detected and neutralized</span></div>
+                <div className="flex gap-2"><Badge color="#a78bfa">redacted</Badge><span className="text-slate-500">PII tokenized in-flight</span></div>
+                <div className="flex gap-2"><Badge color="#f59e0b">step_up_approval</Badge><span className="text-slate-500">human approval requested</span></div>
+                <div className="flex gap-2"><Badge color="#10b981">allowed</Badge><span className="text-slate-500">tool call approved and forwarded</span></div>
+              </div>
+            </div>
+            <p className="text-slate-500">Verify an incoming delivery:</p>
+            <CodeBlock
+              language="python"
+              code={`import hmac, hashlib
+
+def verify(body: bytes, signature: str, secret: str) -> bool:
+    expected = hmac.new(
+        secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+# In your Flask/FastAPI handler:
+# sig = request.headers["X-AgentShield-Signature"]
+# if not verify(await request.body(), sig, WEBHOOK_SECRET):
+#     return 401`}
+            />
+            <p className="text-slate-500">
+              The signing secret is shown <span className="text-amber-400">once</span> when
+              the webhook is created. Store it like any other credential.
+            </p>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="errors" title="Error Codes">
+            <div className="border border-emerald-500/10 p-3 mt-2">
+              {[
+                { code: "400", desc: "Bad request — malformed body or invalid ID", color: "#94a3b8" },
+                { code: "401", desc: "Missing or invalid API key", color: "#38bdf8" },
+                { code: "403", desc: "Blocked by policy or injection scan — see reason", color: "#f43f5e" },
+                { code: "404", desc: "Resource not found or not owned by tenant", color: "#94a3b8" },
+                { code: "429", desc: "Rate limit exceeded — check X-RateLimit-Reset", color: "#f59e0b" },
+                { code: "500", desc: "Internal error — trace_id included for support", color: "#f43f5e" },
+                { code: "503", desc: "Upstream provider unreachable", color: "#f43f5e" },
+              ].map((e) => (
+                <div key={e.code} className="flex items-start gap-3 py-1.5 border-b border-emerald-500/5 last:border-0">
+                  <code
+                    className="text-[10px] font-mono font-bold w-10"
+                    style={{ color: e.color }}
+                  >
+                    {e.code}
+                  </code>
+                  <span className="text-[10px] font-mono text-slate-500">{e.desc}</span>
+                </div>
+              ))}
+            </div>
+            <p className="text-slate-500 mt-3">
+              Every error response includes a{" "}
+              <code className="text-cyan-400">trace_id</code>. Cross-reference it
+              against the Events page or <code className="text-cyan-400">X-Trace-Id</code>{" "}
+              to find the full audit entry.
+            </p>
+          </DocSection>
+
+          {/* ───────────────────────────────────────────── */}
+          <DocSection id="threat-model" title="Threat Model">
+            <p className="text-slate-400">
+              AgentShield is an <span className="text-emerald-400">in-band</span>{" "}
+              defense for the LLM gateway boundary. It stops threats that flow
+              through the API. It does not replace IAM, network security, or
+              application-layer authorization.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+              <div className="border border-emerald-500/20 p-3">
+                <div className="text-[9px] font-mono tracking-widest text-emerald-400 uppercase mb-2">
+                  ✓ Protects against
+                </div>
+                <ul className="text-[10px] font-mono text-slate-400 space-y-1 leading-snug">
+                  <li>• Direct prompt injection (inbound)</li>
+                  <li>• Prompt smuggling inside tool arguments</li>
+                  <li>• PII leakage to upstream LLM providers</li>
+                  <li>• Unauthorized tool execution</li>
+                  <li>• SQL injection via tool call arguments</li>
+                  <li>• Data exfiltration patterns</li>
+                  <li>• Audit log tampering (hash-chained)</li>
+                  <li>• Credential theft (keys hashed at rest)</li>
+                </ul>
+              </div>
+              <div className="border border-rose-500/20 p-3">
+                <div className="text-[9px] font-mono tracking-widest text-rose-400 uppercase mb-2">
+                  ✗ Does not protect against
+                </div>
+                <ul className="text-[10px] font-mono text-slate-400 space-y-1 leading-snug">
+                  <li>• Compromised agent runtime</li>
+                  <li>• Direct DB access bypassing the gateway</li>
+                  <li>• Attacks between agent and tool (e.g. malicious MCP server)</li>
+                  <li>• Adversarial inputs that defeat the judge</li>
+                  <li>• Model weight tampering</li>
+                  <li>• Side-channel attacks</li>
+                  <li>• Post-execution tool side effects</li>
+                  <li>• DDoS at L3/L4 (use Cloudflare)</li>
+                </ul>
+              </div>
+            </div>
+            <p className="text-slate-500 mt-3">
+              Full threat model with STRIDE analysis:{" "}
+              <span className="text-emerald-400">docs/threat-model.md</span> (coming soon).
+            </p>
+          </DocSection>
+
+          <div className="mt-12 pt-6 border-t border-emerald-500/10 text-[9px] font-mono text-slate-700">
+            AgentShield v0.2.0 · Built for autonomous AI agents · Contact: security@agentshield.app
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ToggleRow({
   label,
   description,
@@ -3665,6 +4254,7 @@ function Sidebar({ view, onChange, expanded, onToggle }: {
     { id: "agents", label: "Agents", icon: <Users className="w-3.5 h-3.5" /> },
     { id: "webhooks", label: "Webhooks", icon: <Webhook className="w-3.5 h-3.5" /> },
     { id: "settings", label: "Settings", icon: <Settings className="w-3.5 h-3.5" /> },
+    { id: "docs", label: "Docs", icon: <FileSearch className="w-3.5 h-3.5" /> },
   ];
 
   const sections = [
@@ -3753,6 +4343,7 @@ function TopBar({ time, utc, view, onCommand, onBack, onNotifications, unreadCou
     agents: "Agents",
     webhooks: "Webhooks",
     settings: "Settings",
+    docs: "Documentation",
   };
 
   return (
@@ -3938,6 +4529,12 @@ export default function Dashboard() {
   const blocks = metrics?.total_blocks ?? 0;
   const total = metrics?.total_events ?? 0;
 
+  const { data: me } = useSWR<{
+    user_id: string;
+    email: string;
+    email_verified: boolean;
+  }>("/api/auth/me", fetcher, { refreshInterval: 30000 });
+
   useEffect(() => {
     if (!mounted || !metrics) return;
     setTotalHistory((h) => [...h, total].slice(-20));
@@ -4070,6 +4667,7 @@ export default function Dashboard() {
       {view === "agents" && <AgentsPage onToast={push} />}
       {view === "webhooks" && <WebhooksPage onToast={push} />}
       {view === "settings" && <SettingsPage onToast={push} />}
+      {view === "docs" && <DocsPage />}
 
       {flashKey > 0 && (
         <div key={flashKey}
@@ -4107,6 +4705,9 @@ export default function Dashboard() {
         unreadCount={unreadCount}
         notificationsOpen={notificationsOpen}
       />
+            {me && me.email_verified === false && (
+        <VerifyEmailBanner email={me.email} onToast={push} />
+      )}
       <Sidebar
         view={view} onChange={setView}
         expanded={sidebarExpanded}
@@ -4138,3 +4739,4 @@ export default function Dashboard() {
     </main>
   );
 }
+

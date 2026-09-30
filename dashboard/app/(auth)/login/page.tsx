@@ -114,19 +114,31 @@ function LoginPageInner() {
     } else {
       errorSfx();
       pushLine("✗ verification failed");
-      pushLine("  reason · invalid credentials");
-      pushLine("  status · 401 unauthorized");
       setStage("denied");
       setShowHash(false);
+
       const err = apiResult.err;
       if (err instanceof ApiError) {
-        setError(
-          err.detail === "invalid_credentials"
-            ? "Invalid email or password."
-            : typeof err.detail === "string"
-              ? err.detail
-              : "Login failed."
-        );
+        const detail =
+          typeof err.detail === "string" ? err.detail : "";
+
+        // Account lockout (HTTP 423 from the backend)
+        if (detail.startsWith("account_locked")) {
+          const mins = detail.match(/(\d+)/)?.[1] ?? "15";
+          pushLine("  reason · account locked");
+          pushLine(`  retry in · ${mins} minutes`);
+          pushLine("  status · 423 locked");
+          setError(
+            `Account locked after too many failed attempts. Try again in ${mins} minutes, or reset your password.`
+          );
+        } else if (detail === "invalid_credentials") {
+          pushLine("  reason · invalid credentials");
+          pushLine("  status · 401 unauthorized");
+          setError("Invalid email or password.");
+        } else {
+          pushLine("  reason · " + (detail || "unknown"));
+          setError(detail || "Login failed.");
+        }
       } else {
         setError("Network error. Please try again.");
       }
@@ -197,6 +209,16 @@ function LoginPageInner() {
             onFocus={() => setFocusedField("password")}
             onBlur={() => setFocusedField(null)}
           />
+
+          {/* Forgot password link */}
+          <div className="text-right -mt-1">
+            <Link
+              href="/forgot-password"
+              className="text-[9px] font-mono tracking-widest uppercase text-slate-500 hover:text-cyan-400 transition-colors"
+            >
+              Forgot password?
+            </Link>
+          </div>
 
           {error && (
             <div className="flex items-start gap-2 bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-[11px] font-mono text-rose-300 animate-[cardFlip_0.3s_ease-out]">

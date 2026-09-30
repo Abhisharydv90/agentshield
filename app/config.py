@@ -40,4 +40,15 @@ class Settings(BaseSettings):
     KILL_PII: bool = False
     KILL_JUDGE: bool = False
 
+    # --- Email (Resend) ---
+    RESEND_API_KEY: str = ""
+    RESEND_FROM: str = "onboarding@resend.dev"
+    APP_BASE_URL: str = "http://localhost:3000"
+
+    # --- Auth hardening ---
+    LOCKOUT_THRESHOLD: int = 5
+    LOCKOUT_DURATION_MINUTES: int = 15
+    PASSWORD_RESET_TTL_MINUTES: int = 30
+    EMAIL_VERIFICATION_TTL_HOURS: int = 24
+
 settings = Settings()

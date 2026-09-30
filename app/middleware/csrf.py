@@ -5,7 +5,7 @@ CSRF protection using the double-submit cookie pattern.
   cookie is set (readable by JS, not HttpOnly).
 - On state-changing requests (POST/PUT/PATCH/DELETE) to /api/*, the client
   must send the same token in the `X-CSRF-Token` header.
-- Login/signup/logout are exempt because there's no session yet.
+- Public auth endpoints are exempt because there's no session yet.
 """
 
 from __future__ import annotations
@@ -18,12 +18,22 @@ COOKIE_NAME = "agentshield_csrf"
 HEADER_NAME = "x-csrf-token"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
-# Endpoints that are exempt from CSRF checks (no session to protect)
+# Endpoints that are exempt from CSRF checks (no session to protect).
+# IMPORTANT: only add here if the endpoint is reachable WITHOUT a session.
+# Anything that reads request.state.tenant or a session cookie MUST go
+# through the CSRF check.
 _EXEMPT_PREFIXES = (
+    # Pre-session auth flows
     "/api/auth/signup",
     "/api/auth/login",
     "/api/auth/logout",
-    "/api/auth/2fa/challenge",  # uses a pending token, not a session
+    "/api/auth/2fa/challenge",     # uses a pending token, not a session
+
+    # Account recovery — user is locked out or hasn't logged in
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
+    "/api/auth/verify-email",
+    "/api/auth/resend-verification",
 )
 
 

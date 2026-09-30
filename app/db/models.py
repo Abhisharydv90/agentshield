@@ -128,6 +128,14 @@ class User(Base):
         String(20), default="active", nullable=False
     )
 
+    # --- Brute-force lockout (added for auth hardening) ---
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
 
 class TOTPCredential(Base):
     """
@@ -321,6 +329,51 @@ class Webhook(Base):
 
 
 # ============================================================
+# Auth tokens (password reset + email verification)
+# ============================================================
+
+class AuthToken(Base):
+    """
+    One-time tokens for password reset and email verification.
+
+    Only the SHA-256 of the raw token is stored — the plaintext is shown
+    once, in the email link, and never persisted. A row is marked `used_at`
+    on consumption and a fresh one is issued on resend, so tokens are
+    single-use with an absolute expiry.
+    """
+
+    __tablename__ = "auth_tokens"
+
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    # kind: "password_reset" | "email_verification"
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    request_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+# ============================================================
 # Requests & security events
 # ============================================================
 
@@ -409,4 +462,10 @@ Index(
     "ix_webhooks_tenant_active",
     Webhook.tenant_id,
     Webhook.active,
+)
+Index(
+    "ix_auth_tokens_user_kind_active",
+    AuthToken.user_id,
+    AuthToken.kind,
+    AuthToken.used_at,
 )
