@@ -8,17 +8,42 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from app.config import settings
 from app.middleware.trace import get_trace_id
 from app.security.injection.detector import scan_inbound
 from app.security.pii.redactor import get_redactor
 from app.proxy.outbound import process_outbound_stream
-from app.policy.dsl import EXAMPLE_POLICY
+from app.policy.dsl import EXAMPLE_POLICY, Policy, policy_from_db_rules
 from app.db.session import async_session
+from app.db.models import Policy as PolicyModel
 from app.telemetry.audit import write_event
 
 router = APIRouter(prefix="/v1", tags=["proxy"])
+
+
+async def _load_active_policy(tenant_id) -> tuple[Policy, str]:
+    """
+    Load the tenant's active policy from the DB. Falls back to EXAMPLE_POLICY
+    if no active policy exists, so a fresh tenant is still protected by
+    sensible defaults instead of being wide-open.
+    """
+    async with async_session() as session:
+        row = (
+            await session.execute(
+                select(PolicyModel)
+                .where(PolicyModel.tenant_id == tenant_id)
+                .where(PolicyModel.active == True)  # noqa: E712
+                .order_by(PolicyModel.updated_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    if row is None:
+        return EXAMPLE_POLICY, "fallback"
+
+    return policy_from_db_rules(row.rules), row.version
 
 
 @router.post("/chat/completions")
@@ -72,6 +97,9 @@ async def chat_completions(request: Request):
             except Exception as e:
                 print(f"WARN: PII audit log failed: {e}")
 
+    # --- Layer 3: Load tenant's active policy (or fall back) ---
+    policy, policy_version = await _load_active_policy(tenant_id)
+
     # --- Forward to upstream LLM ---
     headers = {
         "Authorization": f"Bearer {settings.UPSTREAM_KEY}",
@@ -94,8 +122,8 @@ async def chat_completions(request: Request):
         return StreamingResponse(
             process_outbound_stream(
                 upstream_iterator=upstream_resp.aiter_bytes(),
-                policy=EXAMPLE_POLICY,
-                policy_version="1.0.0",
+                policy=policy,
+                policy_version=policy_version,
                 trace_id=trace_id,
                 tenant_id=tenant_id,
             ),

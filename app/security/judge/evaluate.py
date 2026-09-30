@@ -1,4 +1,5 @@
 import json
+import uuid
 from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -21,83 +22,112 @@ Rules:
 - Data exfiltration patterns (SELECT * ... then POST external) => deny.
 - If uncertain, deny. Default is DENY."""
 
-# Configure the new Google GenAI Client with the stable v1 API
 client = genai.Client(api_key=settings.JUDGE_KEY)
 
-async def execute_tool_with_judge(raw_tool_call: dict, policy: Policy, policy_version: str) -> dict:
+
+async def execute_tool_with_judge(
+    raw_tool_call: dict,
+    policy: Policy,
+    policy_version: str,
+    tenant_id: uuid.UUID,
+    trace_id: str | None = None,
+) -> dict:
     """
-    The full circuit breaker pipeline:
-    1. Normalize
-    2. Policy Engine (deterministic)
-    3. LLM Judge (probabilistic)
-    4. Audit Log (tamper-evident)
-    Returns a decision dict and logs everything.
+    Full circuit-breaker pipeline:
+      1. Normalize (deterministic)
+      2. Policy engine (deterministic)
+      3. LLM judge (probabilistic, fail-closed)
+      4. Audit log (tamper-evident)
+
+    Returns a verdict dict. Every branch is audit-logged.
     """
-    trace_id = None
-    
+
     # --- Layer 1: Normalizer ---
     normalized = normalize_tool_call(raw_tool_call)
     try:
         nc = NormalizedToolCall(**normalized)
     except ValueError:
-        await _log(trace_id, "unauthorized_tool", "blocked", "normalization_rejected")
-        return {"decision": "deny", "reason": "normalization_rejected", "category": "other"}
+        await _log(
+            tenant_id, trace_id,
+            "unauthorized_tool", "blocked", "normalization_rejected",
+        )
+        return {
+            "decision": "deny",
+            "reason": "normalization_rejected",
+            "category": "other",
+        }
 
-       # --- Layer 2: Policy Engine ---
+    # --- Layer 2: Policy engine ---
     policy_verdict = evaluate_policy(nc, policy)
 
     if policy_verdict.decision == "deny":
-        await _log(trace_id, "unauthorized_tool", "blocked", policy_verdict.reason)
-        return {"decision": "deny", "reason": policy_verdict.reason, "category": "policy"}
+        await _log(
+            tenant_id, trace_id,
+            "unauthorized_tool", "blocked", policy_verdict.reason,
+        )
+        return {
+            "decision": "deny",
+            "reason": policy_verdict.reason,
+            "category": "policy",
+        }
 
     if policy_verdict.decision == "step_up":
-        await _log(trace_id, "unauthorized_tool", "step_up_approval", policy_verdict.reason)
+        await _log(
+            tenant_id, trace_id,
+            "unauthorized_tool", "step_up_approval", policy_verdict.reason,
+        )
         return {
             "decision": "step_up",
             "reason": policy_verdict.reason,
             "category": "privilege_escalation",
             "policy_version": policy_version,
         }
-    # --- Layer 3: LLM Judge (unless kill switch is on) ---
-    if settings.KILL_JUDGE:
-        return {"decision": "allow", "reason": "kill_switch_active", "category": "benign"}
 
-    # Retry logic for transient API failures (503, 429)
+    # --- Kill switch ---
+    if settings.KILL_JUDGE:
+        return {
+            "decision": "allow",
+            "reason": "kill_switch_active",
+            "category": "benign",
+        }
+
+    # --- Layer 3: LLM judge ---
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type(Exception),
-        reraise=True
+        reraise=True,
     )
     async def _call_judge():
-        model_name = settings.JUDGE_MODEL
         return await client.aio.models.generate_content(
-            model=model_name,
-            contents=json.dumps({"tool_call": nc.model_dump(), "policy": policy.model_dump()}),
+            model=settings.JUDGE_MODEL,
+            contents=json.dumps({
+                "tool_call": nc.model_dump(),
+                "policy": policy.model_dump(),
+            }),
             config=types.GenerateContentConfig(
                 system_instruction=JUDGE_SYSTEM,
                 temperature=0,
                 response_mime_type="application/json",
-            )
+            ),
         )
 
     try:
         response = await _call_judge()
-        raw_verdict = response.text
-        verdict = JudgeVerdict(**json.loads(raw_verdict))
+        verdict = JudgeVerdict(**json.loads(response.text))
     except Exception as e:
-        # Fail closed. If the judge errors after retries, we deny.
+        # Fail closed.
         verdict = JudgeVerdict(
-            decision="deny", 
-            risk=1.0, 
+            decision="deny",
+            risk=1.0,
             category="other",
-            reason=f"judge_failure_failclosed: {str(e)[:100]}", 
-            policy_version=policy_version
+            reason=f"judge_failure_failclosed: {str(e)[:100]}",
+            policy_version=policy_version,
         )
 
-        # --- Layer 4: Audit Log ---
+    # --- Layer 4: Audit ---
     action = "blocked" if verdict.decision == "deny" else "allowed"
-    await _log(trace_id, verdict.category, action, verdict.reason)
+    await _log(tenant_id, trace_id, verdict.category, action, verdict.reason)
 
     return {
         "decision": verdict.decision,
@@ -107,13 +137,24 @@ async def execute_tool_with_judge(raw_tool_call: dict, policy: Policy, policy_ve
         "policy_version": verdict.policy_version,
     }
 
-async def _log(trace_id, threat_category: str, action_taken: str, reason: str):
-    """Helper to write to the hash-chained audit log."""
-    async with async_session() as session:
-        await write_event(
-            session=session,
-            request_id=trace_id,
-            threat_category=threat_category,
-            action_taken=action_taken,
-            evaluator_reasoning=reason,
-        )
+
+async def _log(
+    tenant_id: uuid.UUID,
+    trace_id: str | None,
+    threat_category: str,
+    action_taken: str,
+    reason: str,
+) -> None:
+    """Write to the hash-chained audit log. Never raises."""
+    try:
+        async with async_session() as session:
+            await write_event(
+                session=session,
+                tenant_id=tenant_id,
+                request_id=trace_id,
+                threat_category=threat_category,
+                action_taken=action_taken,
+                evaluator_reasoning=reason,
+            )
+    except Exception as e:
+        print(f"CRITICAL: audit write failed: {e}")

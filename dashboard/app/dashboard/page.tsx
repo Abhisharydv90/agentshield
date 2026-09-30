@@ -13,6 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import useSWR from "swr";
+import { apiFetch } from "@/lib/csrf";
 import * as THREE from "three";
 import { OrbitControls as ThreeOrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
@@ -32,7 +33,7 @@ import {
   BarChart3, PieChart, Menu, MoreVertical, Mail, MessageSquare,
   Send, Calendar,
 } from "lucide-react";
-
+import Link from "next/link";
 /* ============================================================
    SECTION 1 — Constants & types
    ============================================================ */
@@ -1652,59 +1653,216 @@ function EventsPage({ events, onSelect, onExport }: {
 }
 
 function PoliciesPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) {
-  const [policies, setPolicies] = useState<Policy[]>([
-    { policy_id: "pol-001", name: "billing-agent-default", version: "1.0.0", active: true, rules_count: 12, created_at: new Date(Date.now() - 86400000).toISOString(), description: "Read billing, write invoices, block destructive SQL" },
-    { policy_id: "pol-002", name: "email-agent-restrictive", version: "2.1.0", active: true, rules_count: 8, created_at: new Date(Date.now() - 172800000).toISOString(), description: "Requires human approval for all outbound email" },
-    { policy_id: "pol-003", name: "dev-sandbox", version: "0.4.2", active: false, rules_count: 3, created_at: new Date(Date.now() - 259200000).toISOString(), description: "Loose rules for local development only" },
-  ]);
-  const [editing, setEditing] = useState<Policy | null>(null);
+  const { data: policies, mutate } = useSWR<
+    Array<{
+      policy_id: string;
+      name: string;
+      description: string;
+      version: string;
+      active: boolean;
+      rules: Array<{
+        tool_pattern: string;
+        op: string | null;
+        target_allowlist: string[];
+        target_denylist: string[];
+        decision: string;
+      }>;
+      rules_count: number;
+      created_at: string;
+      updated_at: string;
+    }>
+  >("/api/tenant/policies", fetcher);
 
-  const toggleActive = (id: string) => {
-    setPolicies((prev) => prev.map((p) => p.policy_id === id ? { ...p, active: !p.active } : p));
-    const p = policies.find((x) => x.policy_id === id);
-    if (p) onToast({ kind: "success", title: p.active ? "Policy disabled" : "Policy enabled", description: p.name });
-  };
+  const [editing, setEditing] = useState<any | null>(null);
 
-  const handleDelete = (id: string) => {
-    setPolicies((prev) => prev.filter((p) => p.policy_id !== id));
-    onToast({ kind: "warn", title: "Policy deleted", description: `Removed policy ${id}` });
-  };
+  async function toggleActive(id: string, active: boolean) {
+    try {
+      const res = await apiFetch(`/api/tenant/policies/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ active }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      onToast({
+        kind: "success",
+        title: active ? "Policy enabled" : "Policy disabled",
+      });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to update",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function deletePolicy(id: string, name: string) {
+    if (!confirm(`Delete policy "${name}"? This cannot be undone.`)) return;
+    try {
+      const res = await apiFetch(`/api/tenant/policies/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      onToast({ kind: "warn", title: "Policy deleted", description: name });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to delete",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function savePolicy(draft: any) {
+    try {
+      const isNew = !draft.policy_id || draft.policy_id === "new";
+      const url = isNew
+        ? "/api/tenant/policies"
+        : `/api/tenant/policies/${draft.policy_id}`;
+      const method = isNew ? "POST" : "PATCH";
+
+      const res = await apiFetch(url, {
+        method,
+        body: JSON.stringify({
+          name: draft.name,
+          description: draft.description,
+          version: draft.version,
+          active: draft.active,
+          rules: draft.rules,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      setEditing(null);
+      onToast({
+        kind: "success",
+        title: isNew ? "Policy created" : "Policy saved",
+        description: draft.name,
+      });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to save",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
 
   return (
     <div className="absolute inset-0 left-[88px] top-16 p-6 flex flex-col gap-3 pointer-events-auto z-20 overflow-y-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">Policy Registry</h2>
-          <p className="text-[10px] text-slate-500 mt-0.5">Deterministic rule sets evaluated before the LLM Judge</p>
+          <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">
+            Policy Registry
+          </h2>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            Deterministic rule sets evaluated before the LLM Judge
+          </p>
         </div>
-        <Button variant="primary" icon={<Plus className="w-3 h-3" />}
-          onClick={() => setEditing({ policy_id: "new", name: "untitled-policy", version: "0.1.0", active: false, rules_count: 0, created_at: new Date().toISOString(), description: "" })}>
+        <Button
+          variant="primary"
+          icon={<Plus className="w-3 h-3" />}
+          onClick={() =>
+            setEditing({
+              policy_id: "new",
+              name: "",
+              description: "",
+              version: "1.0.0",
+              active: false,
+              rules: [],
+            })
+          }
+        >
           New Policy
         </Button>
       </div>
 
+      {(!policies || policies.length === 0) && !editing && (
+        <Panel>
+          <div className="text-center py-12">
+            <Shield className="w-8 h-8 text-slate-700 mx-auto mb-4" />
+            <div className="text-[12px] font-mono text-slate-400 mb-1">
+              No policies yet
+            </div>
+            <div className="text-[10px] font-mono text-slate-600 mb-4 max-w-md mx-auto leading-relaxed">
+              Policies are the deterministic first layer of defense. They
+              run before the LLM Judge and cost nothing.
+            </div>
+            <Button
+              variant="primary"
+              icon={<Plus className="w-3 h-3" />}
+              onClick={() =>
+                setEditing({
+                  policy_id: "new",
+                  name: "",
+                  description: "",
+                  version: "1.0.0",
+                  active: false,
+                  rules: [],
+                })
+              }
+            >
+              Create your first policy
+            </Button>
+          </div>
+        </Panel>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {policies.map((p) => (
-          <div key={p.policy_id} className="relative bg-black/70 backdrop-blur-2xl border border-emerald-500/10 p-4 hover:border-emerald-500/30 transition-colors">
+        {policies?.map((p) => (
+          <div
+            key={p.policy_id}
+            className="relative bg-black/70 backdrop-blur-2xl border border-emerald-500/10 p-4 hover:border-emerald-500/30 transition-colors"
+          >
             <CornerBrackets />
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-mono text-slate-300 tracking-wider">{p.name}</span>
-              <Badge color={p.active ? "#10b981" : "#64748b"}>{p.active ? "active" : "inactive"}</Badge>
+              <span className="text-[10px] font-mono text-slate-300 tracking-wider">
+                {p.name}
+              </span>
+              <Badge color={p.active ? "#10b981" : "#64748b"}>
+                {p.active ? "active" : "inactive"}
+              </Badge>
             </div>
-            <p className="text-[9px] font-mono text-slate-500 mb-3 leading-relaxed">{p.description}</p>
+            {p.description && (
+              <p className="text-[9px] font-mono text-slate-500 mb-3 leading-relaxed">
+                {p.description}
+              </p>
+            )}
             <div className="space-y-1.5 text-[9px] font-mono">
               <StatLine label="Version" value={p.version} accent="#38bdf8" />
               <StatLine label="Rules" value={p.rules_count} accent="#a78bfa" />
-              <StatLine label="Created" value={formatDateTime(p.created_at).split(",")[0]} accent="#f59e0b" />
+              <StatLine
+                label="Updated"
+                value={formatDateTime(p.updated_at).split(",")[0]}
+                accent="#f59e0b"
+              />
             </div>
             <div className="mt-3 pt-3 border-t border-emerald-500/10 flex items-center gap-2">
-              <button onClick={() => setEditing(p)} className="flex-1 text-[9px] font-mono tracking-wider text-slate-500 hover:text-emerald-400 transition-colors py-1">
+              <button
+                onClick={() => setEditing(p)}
+                className="flex-1 text-[9px] font-mono tracking-wider text-slate-500 hover:text-emerald-400 transition-colors py-1"
+              >
                 <Edit3 className="w-3 h-3 inline mr-1" /> Edit
               </button>
-              <button onClick={() => toggleActive(p.policy_id)} className="flex-1 text-[9px] font-mono tracking-wider text-slate-500 hover:text-amber-400 transition-colors py-1">
-                {p.active ? <><Ban className="w-3 h-3 inline mr-1" /> Disable</> : <><CheckCircle className="w-3 h-3 inline mr-1" /> Enable</>}
+              <button
+                onClick={() => toggleActive(p.policy_id, !p.active)}
+                className="flex-1 text-[9px] font-mono tracking-wider text-slate-500 hover:text-amber-400 transition-colors py-1"
+              >
+                {p.active ? (
+                  <>
+                    <Ban className="w-3 h-3 inline mr-1" /> Disable
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle className="w-3 h-3 inline mr-1" /> Enable
+                  </>
+                )}
               </button>
-              <button onClick={() => handleDelete(p.policy_id)} className="text-[9px] font-mono tracking-wider text-slate-500 hover:text-rose-400 transition-colors py-1">
+              <button
+                onClick={() => deletePolicy(p.policy_id, p.name)}
+                className="text-[9px] font-mono tracking-wider text-slate-500 hover:text-rose-400 transition-colors py-1"
+              >
                 <Trash2 className="w-3 h-3" />
               </button>
             </div>
@@ -1712,47 +1870,233 @@ function PoliciesPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) 
         ))}
       </div>
 
-      {editing && <PolicyEditor policy={editing} onClose={() => setEditing(null)} onSave={(p) => {
-        setPolicies((prev) => prev.find((x) => x.policy_id === p.policy_id)
-          ? prev.map((x) => x.policy_id === p.policy_id ? p : x)
-          : [...prev, p]);
-        setEditing(null);
-        onToast({ kind: "success", title: "Policy saved", description: p.name });
-      }} />}
+      {editing && (
+        <PolicyEditor
+          policy={editing}
+          onClose={() => setEditing(null)}
+          onSave={savePolicy}
+        />
+      )}
     </div>
   );
 }
 
-function PolicyEditor({ policy, onClose, onSave }: {
-  policy: Policy;
+function PolicyEditor({
+  policy,
+  onClose,
+  onSave,
+}: {
+  policy: any;
   onClose: () => void;
-  onSave: (p: Policy) => void;
+  onSave: (p: any) => void;
 }) {
-  const [draft, setDraft] = useState(policy);
+  const [draft, setDraft] = useState({
+    ...policy,
+    rules: policy.rules ?? [],
+  });
+  const [saving, setSaving] = useState(false);
+
+  function addRule() {
+    setDraft({
+      ...draft,
+      rules: [
+        ...draft.rules,
+        {
+          tool_pattern: "db.*",
+          op: "read",
+          target_allowlist: [],
+          target_denylist: [],
+          decision: "allow",
+        },
+      ],
+    });
+  }
+
+  function updateRule(i: number, patch: any) {
+    const next = [...draft.rules];
+    next[i] = { ...next[i], ...patch };
+    setDraft({ ...draft, rules: next });
+  }
+
+  function removeRule(i: number) {
+    setDraft({ ...draft, rules: draft.rules.filter((_: any, x: number) => x !== i) });
+  }
+
+  async function submit() {
+    if (!draft.name.trim()) return;
+    setSaving(true);
+    await onSave(draft);
+    setSaving(false);
+  }
+
   return (
     <div className="absolute inset-0 z-[60] pointer-events-auto flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-[640px] max-w-[92vw] bg-black/95 backdrop-blur-2xl border border-emerald-500/30 shadow-[0_0_80px_rgba(16,185,129,0.15)]">
+      <div className="relative w-[760px] max-w-[94vw] max-h-[90vh] overflow-y-auto bg-black/95 backdrop-blur-2xl border border-emerald-500/30 shadow-[0_0_80px_rgba(16,185,129,0.15)]">
         <CornerBrackets color="border-emerald-500/50" size="md" />
-        <div className="flex items-center justify-between px-5 py-3 border-b border-emerald-500/15">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-emerald-500/15 sticky top-0 bg-black/95 backdrop-blur-xl z-10">
           <div className="flex items-center gap-2.5">
             <Shield className="w-3.5 h-3.5 text-emerald-400" />
             <span className="text-[10px] font-mono tracking-[0.28em] text-slate-300 uppercase">
               {policy.policy_id === "new" ? "Create Policy" : "Edit Policy"}
             </span>
           </div>
-          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center hover:bg-rose-500/10 transition-colors text-slate-500 hover:text-rose-400">
+          <button
+            onClick={onClose}
+            className="w-6 h-6 flex items-center justify-center hover:bg-rose-500/10 transition-colors text-slate-500 hover:text-rose-400"
+          >
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
+
         <div className="p-5 space-y-4">
-          <Field label="Name" value={draft.name} onChange={(v) => setDraft({ ...draft, name: v })} />
-          <Field label="Version" value={draft.version} onChange={(v) => setDraft({ ...draft, version: v })} />
-          <Field label="Description" value={draft.description} onChange={(v) => setDraft({ ...draft, description: v })} multiline />
-          <Field label="Rules Count" value={String(draft.rules_count)} onChange={(v) => setDraft({ ...draft, rules_count: parseInt(v) || 0 })} />
-          <div className="flex justify-end gap-2 pt-2 border-t border-emerald-500/10">
-            <Button onClick={onClose} variant="ghost" icon={<RotateCcw className="w-3 h-3" />}>Cancel</Button>
-            <Button onClick={() => onSave(draft)} variant="primary" icon={<Save className="w-3 h-3" />}>Save Policy</Button>
+          <div className="grid grid-cols-2 gap-4">
+            <Field
+              label="Name"
+              value={draft.name}
+              onChange={(v) => setDraft({ ...draft, name: v })}
+            />
+            <Field
+              label="Version"
+              value={draft.version}
+              onChange={(v) => setDraft({ ...draft, version: v })}
+            />
+          </div>
+          <Field
+            label="Description"
+            value={draft.description}
+            onChange={(v) => setDraft({ ...draft, description: v })}
+            multiline
+          />
+
+          <div className="flex items-center justify-between py-2 border-b border-emerald-500/10">
+            <div>
+              <div className="text-[10px] font-mono text-slate-300">
+                Active on deploy
+              </div>
+              <div className="text-[9px] font-mono text-slate-600 mt-0.5">
+                The gateway will start enforcing this policy immediately
+              </div>
+            </div>
+            <button
+              onClick={() => setDraft({ ...draft, active: !draft.active })}
+              className={`relative w-10 h-5 rounded-full transition-colors ${
+                draft.active ? "bg-emerald-500/30" : "bg-slate-700/50"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
+                  draft.active
+                    ? "left-[22px] bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]"
+                    : "left-0.5 bg-slate-500"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest">
+                Rules ({draft.rules.length})
+              </span>
+              <Button size="sm" onClick={addRule} icon={<Plus className="w-3 h-3" />}>
+                Add Rule
+              </Button>
+            </div>
+
+            <div className="space-y-2">
+              {draft.rules.map((r: any, i: number) => (
+                <div
+                  key={i}
+                  className="bg-black/50 border border-emerald-500/10 p-3 space-y-2"
+                >
+                  <div className="grid grid-cols-[1fr_130px_130px_32px] gap-2">
+                    <input
+                      value={r.tool_pattern}
+                      onChange={(e) => updateRule(i, { tool_pattern: e.target.value })}
+                      placeholder="db.*"
+                      className="bg-black/60 border border-emerald-500/20 px-2 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/60"
+                    />
+                    <select
+                      value={r.op ?? ""}
+                      onChange={(e) =>
+                        updateRule(i, { op: e.target.value || null })
+                      }
+                      className="bg-black/60 border border-emerald-500/20 px-2 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/60"
+                    >
+                      <option value="">any op</option>
+                      <option value="read">read</option>
+                      <option value="write">write</option>
+                      <option value="delete">delete</option>
+                      <option value="execute">execute</option>
+                      <option value="external_call">external_call</option>
+                    </select>
+                    <select
+                      value={r.decision}
+                      onChange={(e) => updateRule(i, { decision: e.target.value })}
+                      className="bg-black/60 border border-emerald-500/20 px-2 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/60"
+                    >
+                      <option value="allow">allow</option>
+                      <option value="deny">deny</option>
+                      <option value="step_up">step_up</option>
+                    </select>
+                    <button
+                      onClick={() => removeRule(i)}
+                      className="flex items-center justify-center text-slate-500 hover:text-rose-400 transition-colors"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      value={r.target_allowlist.join(", ")}
+                      onChange={(e) =>
+                        updateRule(i, {
+                          target_allowlist: e.target.value
+                            .split(",")
+                            .map((x: string) => x.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="allow targets: billing_*, users"
+                      className="bg-black/60 border border-emerald-500/20 px-2 py-1.5 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-emerald-500/60"
+                    />
+                    <input
+                      value={r.target_denylist.join(", ")}
+                      onChange={(e) =>
+                        updateRule(i, {
+                          target_denylist: e.target.value
+                            .split(",")
+                            .map((x: string) => x.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="deny targets: users, auth_*"
+                      className="bg-black/60 border border-emerald-500/20 px-2 py-1.5 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-emerald-500/60"
+                    />
+                  </div>
+                </div>
+              ))}
+              {draft.rules.length === 0 && (
+                <div className="text-center text-slate-600 py-6 text-[10px] font-mono">
+                  No rules yet. Click "Add Rule" to start.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-emerald-500/10 sticky bottom-0 bg-black/95 backdrop-blur-xl py-3">
+            <Button onClick={onClose} variant="ghost" icon={<RotateCcw className="w-3 h-3" />}>
+              Cancel
+            </Button>
+            <Button
+              onClick={submit}
+              variant="primary"
+              icon={<Save className="w-3 h-3" />}
+              disabled={!draft.name.trim() || saving}
+            >
+              {saving ? "Saving…" : "Save Policy"}
+            </Button>
           </div>
         </div>
       </div>
@@ -1820,29 +2164,132 @@ function AuditPage({ events }: { events?: SecurityEvent[] }) {
 }
 
 function AgentsPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) {
-  const [agents] = useState<Agent[]>([
-    { agent_id: "ag-001", name: "billing-agent-v2", scopes: ["read:billing", "write:invoices"], created_at: new Date(Date.now() - 86400000 * 3).toISOString(), last_seen_at: new Date(Date.now() - 60000).toISOString(), status: "active", tenant: "demo" },
-    { agent_id: "ag-002", name: "email-notifier", scopes: ["send:email"], created_at: new Date(Date.now() - 86400000 * 7).toISOString(), last_seen_at: new Date(Date.now() - 3600000).toISOString(), status: "active", tenant: "demo" },
-    { agent_id: "ag-003", name: "legacy-sync", scopes: ["read:users"], created_at: new Date(Date.now() - 86400000 * 30).toISOString(), last_seen_at: new Date(Date.now() - 86400000 * 2).toISOString(), status: "suspended", tenant: "demo" },
-  ]);
-  const [selected, setSelected] = useState<Agent | null>(null);
+  const { data: agents, mutate } = useSWR<
+    Array<{
+      agent_id: string;
+      name: string;
+      description: string;
+      scopes: string[];
+      status: "active" | "suspended" | "revoked";
+      created_at: string;
+      last_seen_at: string | null;
+    }>
+  >("/api/tenant/agents", fetcher);
+
+  const [creating, setCreating] = useState(false);
+  const [selected, setSelected] = useState<any | null>(null);
+
+  async function createAgent(data: {
+    name: string;
+    description: string;
+    scopes: string[];
+  }) {
+    try {
+      const res = await apiFetch("/api/tenant/agents", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      setCreating(false);
+      onToast({ kind: "success", title: "Agent registered", description: data.name });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to register agent",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function updateAgent(agentId: string, patch: Record<string, any>) {
+    try {
+      const res = await apiFetch(`/api/tenant/agents/${agentId}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      setSelected(null);
+      onToast({ kind: "success", title: "Agent updated" });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to update agent",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function deleteAgent(agentId: string, name: string) {
+    if (!confirm(`Delete agent "${name}"? This cannot be undone.`)) return;
+    try {
+      const res = await apiFetch(`/api/tenant/agents/${agentId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      setSelected(null);
+      onToast({ kind: "warn", title: "Agent deleted", description: name });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to delete",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
 
   return (
     <div className="absolute inset-0 left-[88px] top-16 p-6 flex flex-col gap-3 pointer-events-auto z-20 overflow-y-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">Registered Agents</h2>
-          <p className="text-[10px] text-slate-500 mt-0.5">Every agent has a distinct identity with scoped permissions</p>
+          <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">
+            Registered Agents
+          </h2>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            Every agent has a distinct identity with scoped permissions
+          </p>
         </div>
-        <Button variant="primary" icon={<Plus className="w-3 h-3" />}
-          onClick={() => onToast({ kind: "info", title: "Coming soon", description: "Agent registration UI in next release" })}>
+        <Button
+          variant="primary"
+          icon={<Plus className="w-3 h-3" />}
+          onClick={() => setCreating(true)}
+        >
           Register Agent
         </Button>
       </div>
+
+      {(!agents || agents.length === 0) && !creating && (
+        <Panel>
+          <div className="text-center py-12">
+            <Fingerprint className="w-8 h-8 text-slate-700 mx-auto mb-4" />
+            <div className="text-[12px] font-mono text-slate-400 mb-1">
+              No agents registered yet
+            </div>
+            <div className="text-[10px] font-mono text-slate-600 mb-4 max-w-md mx-auto leading-relaxed">
+              Register your first agent to give it a scoped identity, connect
+              it to an API key, and start tracking its actions in the audit
+              chain.
+            </div>
+            <Button
+              variant="primary"
+              icon={<Plus className="w-3 h-3" />}
+              onClick={() => setCreating(true)}
+            >
+              Register your first agent
+            </Button>
+          </div>
+        </Panel>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        {agents.map((a) => (
-          <div key={a.agent_id} onClick={() => setSelected(a)}
-            className="relative bg-black/70 backdrop-blur-2xl border border-emerald-500/10 p-4 hover:border-emerald-500/30 transition-colors cursor-pointer">
+        {agents?.map((a) => (
+          <div
+            key={a.agent_id}
+            onClick={() => setSelected(a)}
+            className="relative bg-black/70 backdrop-blur-2xl border border-emerald-500/10 p-4 hover:border-emerald-500/30 transition-colors cursor-pointer"
+          >
             <CornerBrackets />
             <div className="flex items-start justify-between mb-3">
               <div className="flex items-center gap-2.5">
@@ -1850,83 +2297,449 @@ function AgentsPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) {
                   <Fingerprint className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div>
-                  <div className="text-[11px] font-mono text-slate-200">{a.name}</div>
-                  <div className="text-[9px] font-mono text-slate-600">{a.agent_id}</div>
+                  <div className="text-[11px] font-mono text-slate-200">
+                    {a.name}
+                  </div>
+                  <div className="text-[9px] font-mono text-slate-600">
+                    {a.agent_id.slice(0, 8)}…
+                  </div>
                 </div>
               </div>
-              <Badge color={a.status === "active" ? "#10b981" : a.status === "suspended" ? "#f59e0b" : "#f43f5e"}>{a.status}</Badge>
+              <Badge
+                color={
+                  a.status === "active"
+                    ? "#10b981"
+                    : a.status === "suspended"
+                      ? "#f59e0b"
+                      : "#f43f5e"
+                }
+              >
+                {a.status}
+              </Badge>
             </div>
-            <div className="flex flex-wrap gap-1.5 mb-3">
-              {a.scopes.map((s) => (
-                <span key={s} className="text-[8px] font-mono tracking-wider text-cyan-400/80 border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-px">{s}</span>
-              ))}
-            </div>
+
+            {a.description && (
+              <p className="text-[10px] font-mono text-slate-500 mb-3 leading-relaxed">
+                {a.description}
+              </p>
+            )}
+
+            {a.scopes.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {a.scopes.map((s) => (
+                  <span
+                    key={s}
+                    className="text-[8px] font-mono tracking-wider text-cyan-400/80 border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-px"
+                  >
+                    {s}
+                  </span>
+                ))}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2 text-[9px] font-mono">
               <div>
-                <div className="text-slate-600 uppercase tracking-widest mb-0.5">Created</div>
-                <div className="text-slate-400">{formatDateTime(a.created_at).split(",")[0]}</div>
+                <div className="text-slate-600 uppercase tracking-widest mb-0.5">
+                  Created
+                </div>
+                <div className="text-slate-400">
+                  {formatDateTime(a.created_at).split(",")[0]}
+                </div>
               </div>
               <div>
-                <div className="text-slate-600 uppercase tracking-widest mb-0.5">Last Seen</div>
-                <div className="text-slate-400">{a.last_seen_at ? formatTime(a.last_seen_at) : "—"}</div>
+                <div className="text-slate-600 uppercase tracking-widest mb-0.5">
+                  Last Seen
+                </div>
+                <div className="text-slate-400">
+                  {a.last_seen_at ? formatTime(a.last_seen_at) : "never"}
+                </div>
               </div>
             </div>
           </div>
         ))}
       </div>
-      {selected && <AgentDetailModal agent={selected} onClose={() => setSelected(null)} />}
+
+      {creating && (
+        <AgentCreateModal
+          onClose={() => setCreating(false)}
+          onSave={createAgent}
+        />
+      )}
+
+      {selected && (
+        <AgentDetailModal
+          agent={selected}
+          onClose={() => setSelected(null)}
+          onUpdate={(patch) => updateAgent(selected.agent_id, patch)}
+          onDelete={() => deleteAgent(selected.agent_id, selected.name)}
+        />
+      )}
     </div>
   );
 }
 
-function AgentDetailModal({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+function AgentCreateModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (data: { name: string; description: string; scopes: string[] }) => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [scopes, setScopes] = useState<string[]>(["read:billing"]);
+  const [scopeInput, setScopeInput] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  function addScope() {
+    const s = scopeInput.trim();
+    if (!s || scopes.includes(s)) return;
+    setScopes((prev) => [...prev, s]);
+    setScopeInput("");
+  }
+
+  async function submit() {
+    if (!name.trim()) return;
+    setSaving(true);
+    await onSave({ name: name.trim(), description: description.trim(), scopes });
+    setSaving(false);
+  }
+
   return (
     <div className="absolute inset-0 z-[60] pointer-events-auto flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-[600px] max-w-[92vw] bg-black/95 backdrop-blur-2xl border border-emerald-500/30 shadow-[0_0_80px_rgba(16,185,129,0.15)]">
+      <div className="relative w-[640px] max-w-[92vw] bg-black/95 backdrop-blur-2xl border border-emerald-500/30 shadow-[0_0_80px_rgba(16,185,129,0.15)]">
         <CornerBrackets color="border-emerald-500/50" size="md" />
         <div className="flex items-center justify-between px-5 py-3 border-b border-emerald-500/15">
           <div className="flex items-center gap-2.5">
             <Fingerprint className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-[10px] font-mono tracking-[0.28em] text-slate-300 uppercase">Agent Detail</span>
+            <span className="text-[10px] font-mono tracking-[0.28em] text-slate-300 uppercase">
+              Register Agent
+            </span>
           </div>
-          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center hover:bg-rose-500/10 transition-colors text-slate-500 hover:text-rose-400">
+          <button
+            onClick={onClose}
+            className="w-6 h-6 flex items-center justify-center hover:bg-rose-500/10 transition-colors text-slate-500 hover:text-rose-400"
+          >
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
-        <div className="p-5 space-y-3 text-[10px] font-mono">
+
+        <div className="p-5 space-y-4">
           <div>
-            <div className="text-slate-600 uppercase tracking-widest mb-1">Name</div>
-            <div className="text-slate-200 text-[12px]">{agent.name}</div>
+            <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block mb-1.5">
+              Agent Name
+            </label>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="billing-agent-v3"
+              className="w-full bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50"
+            />
           </div>
+
           <div>
-            <div className="text-slate-600 uppercase tracking-widest mb-1">Agent ID</div>
-            <div className="text-slate-400">{agent.agent_id}</div>
+            <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block mb-1.5">
+              Description (optional)
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={2}
+              placeholder="Handles invoice lookups and refund processing for the billing team."
+              className="w-full bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50 resize-none"
+            />
           </div>
+
           <div>
-            <div className="text-slate-600 uppercase tracking-widest mb-1">Tenant</div>
-            <div className="text-slate-400">{agent.tenant}</div>
-          </div>
-          <div>
-            <div className="text-slate-600 uppercase tracking-widest mb-1">Status</div>
-            <Badge color={agent.status === "active" ? "#10b981" : "#f59e0b"}>{agent.status}</Badge>
-          </div>
-          <div>
-            <div className="text-slate-600 uppercase tracking-widest mb-1">Scopes</div>
-            <div className="flex flex-wrap gap-1.5">
-              {agent.scopes.map((s) => (
-                <span key={s} className="text-[8px] font-mono tracking-wider text-cyan-400/80 border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-px">{s}</span>
-              ))}
+            <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block mb-1.5">
+              Scopes
+            </label>
+            <div className="flex gap-2 mb-2">
+              <input
+                value={scopeInput}
+                onChange={(e) => setScopeInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addScope();
+                  }
+                }}
+                placeholder="read:billing · write:invoices · send:email"
+                className="flex-1 bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50"
+              />
+              <Button size="sm" onClick={addScope} icon={<Plus className="w-3 h-3" />}>
+                Add
+              </Button>
             </div>
+            {scopes.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {scopes.map((s) => (
+                  <span
+                    key={s}
+                    className="text-[9px] font-mono tracking-wider text-cyan-400/90 border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 flex items-center gap-1.5"
+                  >
+                    {s}
+                    <button
+                      onClick={() => setScopes((prev) => prev.filter((x) => x !== s))}
+                      className="text-cyan-400/60 hover:text-rose-400 transition-colors"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-emerald-500/10">
+            <Button onClick={onClose} variant="ghost" icon={<RotateCcw className="w-3 h-3" />}>
+              Cancel
+            </Button>
+            <Button
+              onClick={submit}
+              variant="primary"
+              icon={<Save className="w-3 h-3" />}
+              disabled={!name.trim() || saving}
+            >
+              {saving ? "Saving…" : "Register Agent"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentDetailModal({
+  agent,
+  onClose,
+  onUpdate,
+  onDelete,
+}: {
+  agent: any;
+  onClose: () => void;
+  onUpdate: (patch: Record<string, any>) => void;
+  onDelete: () => void;
+}) {
+  const [scopes, setScopes] = useState<string[]>(agent.scopes ?? []);
+  const [scopeInput, setScopeInput] = useState("");
+  const [name, setName] = useState(agent.name ?? "");
+  const [description, setDescription] = useState(agent.description ?? "");
+  const [editing, setEditing] = useState(false);
+
+  const dirty =
+    name !== agent.name ||
+    description !== agent.description ||
+    JSON.stringify(scopes) !== JSON.stringify(agent.scopes);
+
+  function addScope() {
+    const s = scopeInput.trim();
+    if (!s || scopes.includes(s)) return;
+    setScopes((prev) => [...prev, s]);
+    setScopeInput("");
+    setEditing(true);
+  }
+
+  function removeScope(s: string) {
+    setScopes((prev) => prev.filter((x) => x !== s));
+    setEditing(true);
+  }
+
+  function saveAll() {
+    if (!dirty) return;
+    onUpdate({ name: name.trim(), description: description.trim(), scopes });
+  }
+
+  return (
+    <div className="absolute inset-0 z-[60] pointer-events-auto flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-[680px] max-w-[92vw] max-h-[90vh] overflow-y-auto bg-black/95 backdrop-blur-2xl border border-emerald-500/30 shadow-[0_0_80px_rgba(16,185,129,0.15)]">
+        <CornerBrackets color="border-emerald-500/50" size="md" />
+        <div className="flex items-center justify-between px-5 py-3 border-b border-emerald-500/15 sticky top-0 bg-black/95 backdrop-blur-xl z-10">
+          <div className="flex items-center gap-2.5">
+            <Fingerprint className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[10px] font-mono tracking-[0.28em] text-slate-300 uppercase">
+              Agent Detail
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-6 h-6 flex items-center justify-center hover:bg-rose-500/10 transition-colors text-slate-500 hover:text-rose-400"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4 text-[10px] font-mono">
+          {/* Editable Name */}
+          <div>
+            <label className="text-slate-600 uppercase tracking-widest block mb-1.5">
+              Name
+            </label>
+            <input
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setEditing(true);
+              }}
+              className="w-full bg-black/60 border border-emerald-500/20 px-3 py-2 text-[12px] font-mono text-slate-200 focus:outline-none focus:border-emerald-500/60"
+            />
+          </div>
+
+          {/* Editable Description */}
+          <div>
+            <label className="text-slate-600 uppercase tracking-widest block mb-1.5">
+              Description
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setEditing(true);
+              }}
+              rows={2}
+              placeholder="Optional description"
+              className="w-full bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/60 resize-none"
+            />
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <div className="text-slate-600 uppercase tracking-widest mb-1">Created</div>
-              <div className="text-slate-400">{formatDateTime(agent.created_at)}</div>
+              <div className="text-slate-600 uppercase tracking-widest mb-1">
+                Agent ID
+              </div>
+              <div className="text-slate-400 break-all text-[9px]">
+                {agent.agent_id}
+              </div>
             </div>
             <div>
-              <div className="text-slate-600 uppercase tracking-widest mb-1">Last Seen</div>
-              <div className="text-slate-400">{agent.last_seen_at ? formatDateTime(agent.last_seen_at) : "—"}</div>
+              <div className="text-slate-600 uppercase tracking-widest mb-1">
+                Status
+              </div>
+              <div className="flex gap-1.5 flex-wrap">
+                {(["active", "suspended", "revoked"] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => onUpdate({ status: s })}
+                    className={`text-[9px] font-mono tracking-wider uppercase px-2 py-0.5 border transition-colors ${
+                      agent.status === s
+                        ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400"
+                        : "border-slate-700/50 text-slate-500 hover:border-slate-500"
+                    }`}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Editable Scopes */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-slate-600 uppercase tracking-widest">
+                Scopes
+              </label>
+              <span className="text-[9px] text-slate-700">
+                {scopes.length} total
+              </span>
+            </div>
+
+            <div className="flex gap-2 mb-2">
+              <input
+                value={scopeInput}
+                onChange={(e) => setScopeInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addScope();
+                  }
+                }}
+                placeholder="read:billing · write:invoices · send:email"
+                className="flex-1 bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/60"
+              />
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={addScope}
+                icon={<Plus className="w-3 h-3" />}
+                disabled={!scopeInput.trim()}
+              >
+                Add
+              </Button>
+            </div>
+
+            {scopes.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {scopes.map((s) => (
+                  <span
+                    key={s}
+                    className="text-[9px] font-mono tracking-wider text-cyan-400/90 border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 flex items-center gap-1.5"
+                  >
+                    {s}
+                    <button
+                      onClick={() => removeScope(s)}
+                      className="text-cyan-400/60 hover:text-rose-400 transition-colors"
+                      title="Remove scope"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[10px] text-slate-600 italic py-2">
+                No scopes. Add one above to grant this agent permissions.
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-slate-600 uppercase tracking-widest mb-1">
+                Created
+              </div>
+              <div className="text-slate-400">
+                {formatDateTime(agent.created_at)}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-600 uppercase tracking-widest mb-1">
+                Last Seen
+              </div>
+              <div className="text-slate-400">
+                {agent.last_seen_at ? formatDateTime(agent.last_seen_at) : "never"}
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex justify-between gap-2 pt-3 border-t border-emerald-500/10 sticky bottom-0 bg-black/95 backdrop-blur-xl py-3">
+            <Button
+              onClick={onDelete}
+              variant="danger"
+              icon={<Trash2 className="w-3 h-3" />}
+            >
+              Delete Agent
+            </Button>
+            <div className="flex gap-2">
+              <Button
+                onClick={onClose}
+                variant="ghost"
+                icon={<RotateCcw className="w-3 h-3" />}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={saveAll}
+                variant="primary"
+                icon={<Save className="w-3 h-3" />}
+                disabled={!dirty || !name.trim()}
+              >
+                {dirty ? "Save Changes" : "Saved"}
+              </Button>
             </div>
           </div>
         </div>
@@ -1935,61 +2748,241 @@ function AgentDetailModal({ agent, onClose }: { agent: Agent; onClose: () => voi
   );
 }
 
-function WebhooksPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) {
-  const [webhooks, setWebhooks] = useState<Webhook[]>([
-    { webhook_id: "wh-001", url: "https://hooks.slack.com/services/T00/B00/xyz", events: ["blocked", "redacted"], active: true, created_at: new Date(Date.now() - 86400000 * 5).toISOString() },
-    { webhook_id: "wh-002", url: "https://api.pagerduty.com/events/v2", events: ["blocked"], active: false, created_at: new Date(Date.now() - 86400000 * 12).toISOString() },
-  ]);
-  const [newUrl, setNewUrl] = useState("");
+const WEBHOOK_EVENTS = [
+  { id: "blocked", label: "Blocked", color: "#f43f5e" },
+  { id: "redacted", label: "Redacted", color: "#a78bfa" },
+  { id: "step_up_approval", label: "Step-up Approval", color: "#f59e0b" },
+  { id: "allowed", label: "Allowed", color: "#10b981" },
+];
 
-  const addWebhook = () => {
-    if (!newUrl.trim()) return;
-    setWebhooks((prev) => [
-      ...prev,
-      { webhook_id: `wh-${Date.now()}`, url: newUrl, events: ["blocked"], active: true, created_at: new Date().toISOString() },
-    ]);
-    setNewUrl("");
-    onToast({ kind: "success", title: "Webhook added", description: "Fires on blocked events" });
-  };
+function WebhooksPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) {
+  const { data: webhooks, mutate } = useSWR<
+    Array<{
+      webhook_id: string;
+      url: string;
+      description: string;
+      events: string[];
+      active: boolean;
+      created_at: string;
+      updated_at: string;
+      secret: string | null;
+    }>
+  >("/api/tenant/webhooks", fetcher);
+
+  const [editing, setEditing] = useState<any | null>(null);
+
+  async function toggleActive(id: string, active: boolean) {
+    try {
+      const res = await apiFetch(`/api/tenant/webhooks/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ active }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      onToast({
+        kind: "success",
+        title: active ? "Webhook enabled" : "Webhook disabled",
+      });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to update",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function deleteWebhook(id: string, url: string) {
+    if (!confirm(`Delete webhook "${url}"? This cannot be undone.`)) return;
+    try {
+      const res = await apiFetch(`/api/tenant/webhooks/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutate();
+      onToast({ kind: "warn", title: "Webhook deleted" });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to delete",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function saveWebhook(draft: any) {
+    try {
+      const isNew = !draft.webhook_id || draft.webhook_id === "new";
+      const url = isNew
+        ? "/api/tenant/webhooks"
+        : `/api/tenant/webhooks/${draft.webhook_id}`;
+      const method = isNew ? "POST" : "PATCH";
+
+      const res = await apiFetch(url, {
+        method,
+        body: JSON.stringify({
+          url: draft.url,
+          description: draft.description,
+          events: draft.events,
+          active: draft.active,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      if (isNew && data.secret) {
+        onToast({
+          kind: "success",
+          title: "Webhook created",
+          description: `Secret: ${data.secret.slice(0, 16)}… (copy it)`,
+          ttl: 12000,
+        });
+      } else {
+        onToast({
+          kind: "success",
+          title: "Webhook saved",
+          description: draft.url,
+        });
+      }
+
+      await mutate();
+      setEditing(null);
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to save",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
 
   return (
     <div className="absolute inset-0 left-[88px] top-16 p-6 flex flex-col gap-3 pointer-events-auto z-20 overflow-y-auto">
-      <div>
-        <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">Webhook Integrations</h2>
-        <p className="text-[10px] text-slate-500 mt-0.5">Push alerts to Slack, PagerDuty, Teams, or custom endpoints</p>
-      </div>
-      <Panel>
-        <SectionTitle icon={<Webhook className="w-3 h-3" />} label="Add Webhook" />
-        <div className="flex gap-2">
-          <input
-            value={newUrl}
-            onChange={(e) => setNewUrl(e.target.value)}
-            placeholder="https://hooks.slack.com/..."
-            className="flex-1 bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50"
-          />
-          <Button variant="primary" onClick={addWebhook} icon={<Plus className="w-3 h-3" />}>Add</Button>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">
+            Webhook Integrations
+          </h2>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            Push signed alerts to Slack, PagerDuty, Teams, or custom endpoints
+          </p>
         </div>
-      </Panel>
+        <Button
+          variant="primary"
+          icon={<Plus className="w-3 h-3" />}
+          onClick={() =>
+            setEditing({
+              webhook_id: "new",
+              url: "",
+              description: "",
+              events: ["blocked"],
+              active: true,
+            })
+          }
+        >
+          New Webhook
+        </Button>
+      </div>
+
+      {(!webhooks || webhooks.length === 0) && !editing && (
+        <Panel>
+          <div className="text-center py-12">
+            <Webhook className="w-8 h-8 text-slate-700 mx-auto mb-4" />
+            <div className="text-[12px] font-mono text-slate-400 mb-1">
+              No webhooks configured
+            </div>
+            <div className="text-[10px] font-mono text-slate-600 mb-4 max-w-md mx-auto leading-relaxed">
+              Get pinged the moment a threat is blocked. Payloads are
+              HMAC-SHA256 signed so your endpoint can verify them.
+            </div>
+            <Button
+              variant="primary"
+              icon={<Plus className="w-3 h-3" />}
+              onClick={() =>
+                setEditing({
+                  webhook_id: "new",
+                  url: "",
+                  description: "",
+                  events: ["blocked"],
+                  active: true,
+                })
+              }
+            >
+              Add your first webhook
+            </Button>
+          </div>
+        </Panel>
+      )}
+
       <div className="grid grid-cols-1 gap-2">
-        {webhooks.map((wh) => (
+        {webhooks?.map((wh) => (
           <Panel key={wh.webhook_id}>
-            <div className="flex items-center justify-between">
+            <div className="flex items-start justify-between gap-3">
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <Webhook className="w-3 h-3 text-emerald-400" />
-                  <span className="text-[10px] font-mono text-slate-300 truncate">{wh.url}</span>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Webhook
+                    className="w-3 h-3 shrink-0"
+                    style={{ color: wh.active ? "#10b981" : "#64748b" }}
+                  />
+                  <span className="text-[10px] font-mono text-slate-300 truncate">
+                    {wh.url}
+                  </span>
+                  <Badge color={wh.active ? "#10b981" : "#64748b"}>
+                    {wh.active ? "active" : "inactive"}
+                  </Badge>
                 </div>
+
+                {wh.description && (
+                  <p className="text-[9px] font-mono text-slate-500 mb-2 leading-relaxed">
+                    {wh.description}
+                  </p>
+                )}
+
                 <div className="flex flex-wrap gap-1.5 mb-2">
-                  {wh.events.map((e) => (
-                    <Badge key={e} color={ACTION_COLORS[e] || "#64748b"}>{e}</Badge>
-                  ))}
+                  {wh.events.map((e) => {
+                    const cfg = WEBHOOK_EVENTS.find((x) => x.id === e);
+                    return (
+                      <Badge key={e} color={cfg?.color ?? "#64748b"}>
+                        {cfg?.label ?? e}
+                      </Badge>
+                    );
+                  })}
+                  {wh.events.length === 0 && (
+                    <span className="text-[9px] font-mono text-slate-700">
+                      no events subscribed
+                    </span>
+                  )}
                 </div>
-                <div className="text-[9px] font-mono text-slate-600">Created {formatDateTime(wh.created_at).split(",")[0]}</div>
+
+                <div className="text-[8px] font-mono text-slate-700">
+                  Created {formatDateTime(wh.created_at).split(",")[0]}
+                </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0 ml-3">
-                <Badge color={wh.active ? "#10b981" : "#64748b"}>{wh.active ? "active" : "inactive"}</Badge>
-                <button onClick={() => setWebhooks((prev) => prev.filter((x) => x.webhook_id !== wh.webhook_id))}
-                  className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-rose-400 transition-colors">
+
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => setEditing(wh)}
+                  className="w-7 h-7 flex items-center justify-center text-slate-500 hover:text-emerald-400 transition-colors"
+                  title="Edit"
+                >
+                  <Edit3 className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => toggleActive(wh.webhook_id, !wh.active)}
+                  className="w-7 h-7 flex items-center justify-center text-slate-500 hover:text-amber-400 transition-colors"
+                  title={wh.active ? "Disable" : "Enable"}
+                >
+                  {wh.active ? (
+                    <Ban className="w-3 h-3" />
+                  ) : (
+                    <CheckCircle className="w-3 h-3" />
+                  )}
+                </button>
+                <button
+                  onClick={() => deleteWebhook(wh.webhook_id, wh.url)}
+                  className="w-7 h-7 flex items-center justify-center text-slate-500 hover:text-rose-400 transition-colors"
+                  title="Delete"
+                >
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
@@ -1997,47 +2990,443 @@ function WebhooksPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) 
           </Panel>
         ))}
       </div>
+
+      {editing && (
+        <WebhookEditor
+          webhook={editing}
+          onClose={() => setEditing(null)}
+          onSave={saveWebhook}
+        />
+      )}
     </div>
   );
 }
 
-function SettingsPage() {
-  const [streaming, setStreaming] = useState(true);
-  const [piiEnforce, setPiiEnforce] = useState(true);
-  const [judgeEnforce, setJudgeEnforce] = useState(true);
-  const [sound, setSound] = useState(false);
-  const [emailAlerts, setEmailAlerts] = useState(false);
+function WebhookEditor({
+  webhook,
+  onClose,
+  onSave,
+}: {
+  webhook: any;
+  onClose: () => void;
+  onSave: (w: any) => void;
+}) {
+  const [draft, setDraft] = useState({
+    ...webhook,
+    events: webhook.events ?? [],
+  });
+  const [saving, setSaving] = useState(false);
+
+  function toggleEvent(id: string) {
+    const has = draft.events.includes(id);
+    setDraft({
+      ...draft,
+      events: has
+        ? draft.events.filter((x: string) => x !== id)
+        : [...draft.events, id],
+    });
+  }
+
+  async function submit() {
+    if (!draft.url.trim()) return;
+    setSaving(true);
+    await onSave({ ...draft, url: draft.url.trim() });
+    setSaving(false);
+  }
+
+  return (
+    <div className="absolute inset-0 z-[60] pointer-events-auto flex items-center justify-center">
+      <div
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div className="relative w-[620px] max-w-[94vw] max-h-[90vh] overflow-y-auto bg-black/95 backdrop-blur-2xl border border-emerald-500/30 shadow-[0_0_80px_rgba(16,185,129,0.15)]">
+        <CornerBrackets color="border-emerald-500/50" size="md" />
+        <div className="flex items-center justify-between px-5 py-3 border-b border-emerald-500/15 sticky top-0 bg-black/95 backdrop-blur-xl z-10">
+          <div className="flex items-center gap-2.5">
+            <Webhook className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[10px] font-mono tracking-[0.28em] text-slate-300 uppercase">
+              {webhook.webhook_id === "new" ? "Create Webhook" : "Edit Webhook"}
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-6 h-6 flex items-center justify-center hover:bg-rose-500/10 transition-colors text-slate-500 hover:text-rose-400"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div>
+            <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block mb-1.5">
+              Endpoint URL
+            </label>
+            <input
+              autoFocus
+              value={draft.url}
+              onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+              placeholder="https://hooks.slack.com/services/..."
+              className="w-full bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50"
+            />
+          </div>
+
+          <div>
+            <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block mb-1.5">
+              Description (optional)
+            </label>
+            <input
+              value={draft.description}
+              onChange={(e) =>
+                setDraft({ ...draft, description: e.target.value })
+              }
+              placeholder="Alerts to #security-ops on Slack"
+              className="w-full bg-black/60 border border-emerald-500/20 px-3 py-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50"
+            />
+          </div>
+
+          <div>
+            <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block mb-1.5">
+              Subscribe to events
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {WEBHOOK_EVENTS.map((ev) => {
+                const on = draft.events.includes(ev.id);
+                return (
+                  <button
+                    key={ev.id}
+                    onClick={() => toggleEvent(ev.id)}
+                    className={`flex items-center justify-between px-3 py-2 border text-[10px] font-mono tracking-wider transition-colors ${
+                      on
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                        : "border-slate-700/50 text-slate-500 hover:border-slate-500"
+                    }`}
+                  >
+                    <span>{ev.label}</span>
+                    <span
+                      className="w-3 h-3 rounded-sm border"
+                      style={{
+                        borderColor: on ? ev.color : "#475569",
+                        background: on ? ev.color : "transparent",
+                        boxShadow: on ? `0 0 6px ${ev.color}66` : "none",
+                      }}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between py-2 border-b border-emerald-500/10">
+            <div>
+              <div className="text-[10px] font-mono text-slate-300">Active</div>
+              <div className="text-[9px] font-mono text-slate-600 mt-0.5">
+                Inactive webhooks are kept but not fired
+              </div>
+            </div>
+            <button
+              onClick={() => setDraft({ ...draft, active: !draft.active })}
+              className={`relative w-10 h-5 rounded-full transition-colors ${
+                draft.active ? "bg-emerald-500/30" : "bg-slate-700/50"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
+                  draft.active
+                    ? "left-[22px] bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]"
+                    : "left-0.5 bg-slate-500"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-3 border-t border-emerald-500/10 sticky bottom-0 bg-black/95 backdrop-blur-xl py-3">
+            <Button
+              onClick={onClose}
+              variant="ghost"
+              icon={<RotateCcw className="w-3 h-3" />}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={submit}
+              variant="primary"
+              icon={<Save className="w-3 h-3" />}
+              disabled={!draft.url.trim() || saving}
+            >
+              {saving ? "Saving…" : "Save Webhook"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsPage({ onToast }: { onToast: (t: Omit<Toast, "id">) => void }) {
+  const { data: settings, mutate: mutateSettings } = useSWR<{
+    inbound_scanner_enabled: boolean;
+    pii_redaction_enabled: boolean;
+    judge_enabled: boolean;
+    alert_sounds: boolean;
+    email_alerts: boolean;
+  }>("/api/tenant/settings", fetcher);
+
+  const { data: apiKeys, mutate: mutateKeys } = useSWR<
+    Array<{
+      key_id: string;
+      name: string;
+      key_prefix: string;
+      created_at: string;
+      last_used_at: string | null;
+      revoked: boolean;
+    }>
+  >("/api/tenant/api-keys", fetcher);
+
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [savingToggle, setSavingToggle] = useState<string | null>(null);
+
+  async function updateSetting(field: string, value: boolean) {
+    setSavingToggle(field);
+    try {
+      const res = await apiFetch("/api/tenant/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ [field]: value }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutateSettings();
+      onToast({ kind: "success", title: "Setting saved" });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to save",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    } finally {
+      setSavingToggle(null);
+    }
+  }
+
+  async function createKey() {
+    if (!newKeyName.trim()) return;
+    try {
+      const res = await apiFetch("/api/tenant/api-keys", {
+        method: "POST",
+        body: JSON.stringify({ name: newKeyName.trim() }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setRevealedKey(data.raw_key);
+      setNewKeyName("");
+      setCreatingKey(false);
+      await mutateKeys();
+      onToast({
+        kind: "success",
+        title: "API key created",
+        description: "Copy it now — it won't be shown again",
+      });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to create key",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  async function revokeKey(keyId: string, name: string) {
+    if (!confirm(`Revoke "${name}"? This cannot be undone.`)) return;
+    try {
+      const res = await apiFetch(`/api/tenant/api-keys/${keyId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await mutateKeys();
+      onToast({ kind: "warn", title: "API key revoked", description: name });
+    } catch (e) {
+      onToast({
+        kind: "error",
+        title: "Failed to revoke",
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
 
   return (
     <div className="absolute inset-0 left-[88px] top-16 p-6 flex flex-col gap-3 pointer-events-auto z-20 overflow-y-auto">
       <div>
-        <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">Gateway Settings</h2>
-        <p className="text-[10px] text-slate-500 mt-0.5">Runtime configuration for the AgentShield proxy layer</p>
+        <h2 className="text-sm font-mono tracking-wider text-slate-200 uppercase">
+          Gateway Settings
+        </h2>
+        <p className="text-[10px] text-slate-500 mt-0.5">
+          Runtime configuration for the AgentShield proxy layer
+        </p>
       </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <Panel>
           <SectionTitle icon={<Shield className="w-3 h-3" />} label="Security Enforcement" />
-          <ToggleRow label="Inbound Injection Scanner" description="Block prompts matching known injection patterns" value={streaming} onChange={setStreaming} />
-          <ToggleRow label="PII Redaction" description="Swap sensitive data with reversible placeholders" value={piiEnforce} onChange={setPiiEnforce} />
-          <ToggleRow label="LLM Judge Circuit Breaker" description="Evaluate every tool call with the LLM judge" value={judgeEnforce} onChange={setJudgeEnforce} />
+          <ToggleRow
+            label="Inbound Injection Scanner"
+            description="Block prompts matching known injection patterns"
+            value={settings?.inbound_scanner_enabled ?? true}
+            loading={savingToggle === "inbound_scanner_enabled"}
+            onChange={(v) => updateSetting("inbound_scanner_enabled", v)}
+          />
+          <ToggleRow
+            label="PII Redaction"
+            description="Swap sensitive data with reversible placeholders"
+            value={settings?.pii_redaction_enabled ?? true}
+            loading={savingToggle === "pii_redaction_enabled"}
+            onChange={(v) => updateSetting("pii_redaction_enabled", v)}
+          />
+          <ToggleRow
+            label="LLM Judge Circuit Breaker"
+            description="Evaluate every tool call with the LLM judge"
+            value={settings?.judge_enabled ?? true}
+            loading={savingToggle === "judge_enabled"}
+            onChange={(v) => updateSetting("judge_enabled", v)}
+          />
         </Panel>
+
         <Panel>
           <SectionTitle icon={<Sliders className="w-3 h-3" />} label="Notifications" />
-          <ToggleRow label="Alert Sounds" description="Play audio tone on blocked events" value={sound} onChange={setSound} />
-          <ToggleRow label="Email Alerts" description="Send daily digest to admin email" value={emailAlerts} onChange={setEmailAlerts} />
-          <div className="mt-3 pt-3 border-t border-emerald-500/10">
-            <div className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mb-2">Tenant ID</div>
-            <div className="flex items-center gap-2">
-              <input defaultValue="demo" className="flex-1 bg-black/60 border border-emerald-500/20 px-3 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50" />
-              <Button size="sm" variant="primary">Save</Button>
+          <ToggleRow
+            label="Alert Sounds"
+            description="Play audio tone on blocked events"
+            value={settings?.alert_sounds ?? false}
+            loading={savingToggle === "alert_sounds"}
+            onChange={(v) => updateSetting("alert_sounds", v)}
+          />
+          <ToggleRow
+            label="Email Alerts"
+            description="Send daily digest to admin email"
+            value={settings?.email_alerts ?? false}
+            loading={savingToggle === "email_alerts"}
+            onChange={(v) => updateSetting("email_alerts", v)}
+          />
+        </Panel>
+
+        <Panel className="lg:col-span-2">
+          <SectionTitle
+            icon={<Key className="w-3 h-3" />}
+            label="API Keys"
+            right={
+              !creatingKey && (
+                <button
+                  onClick={() => setCreatingKey(true)}
+                  className="text-[9px] font-mono tracking-widest uppercase text-emerald-400 hover:text-emerald-300 border border-emerald-500/40 hover:border-emerald-400/80 px-2.5 py-1 transition-colors flex items-center gap-1"
+                >
+                  <Plus className="w-2.5 h-2.5" />
+                  New key
+                </button>
+              )
+            }
+          />
+
+          {creatingKey && (
+            <div className="flex items-center gap-2 mb-3 pb-3 border-b border-emerald-500/10">
+              <input
+                autoFocus
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                placeholder="Key name (e.g. production, staging)"
+                className="flex-1 bg-black/60 border border-emerald-500/20 px-3 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-emerald-500/50"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") createKey();
+                  if (e.key === "Escape") {
+                    setCreatingKey(false);
+                    setNewKeyName("");
+                  }
+                }}
+              />
+              <Button size="sm" variant="primary" onClick={createKey}>
+                Create
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setCreatingKey(false);
+                  setNewKeyName("");
+                }}
+              >
+                Cancel
+              </Button>
             </div>
+          )}
+
+          {revealedKey && (
+            <div className="mb-3 pb-3 border-b border-emerald-500/10">
+              <div className="text-[9px] font-mono text-amber-400 uppercase tracking-widest mb-1.5">
+                ⚠ Copy this now — shown only once
+              </div>
+              <div className="flex items-center gap-2 bg-amber-500/5 border border-amber-500/30 p-2.5">
+                <code className="flex-1 text-[10px] font-mono text-amber-300 break-all">
+                  {revealedKey}
+                </code>
+                <button
+                  onClick={async () => {
+                    await copyToClipboard(revealedKey);
+                    onToast({ kind: "success", title: "Copied" });
+                  }}
+                  className="w-6 h-6 flex items-center justify-center text-amber-400 hover:text-amber-300 transition-colors"
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => setRevealedKey(null)}
+                  className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            {apiKeys?.map((k) => (
+              <ApiKeyRow
+                key={k.key_id}
+                name={k.name}
+                prefix={k.key_prefix}
+                created={formatDateTime(k.created_at).split(",")[0]}
+                lastUsed={k.last_used_at ? formatTime(k.last_used_at) : null}
+                revoked={k.revoked}
+                onRevoke={() => revokeKey(k.key_id, k.name)}
+              />
+            ))}
+            {(!apiKeys || apiKeys.length === 0) && (
+              <div className="text-center text-slate-600 py-6 text-[10px] font-mono">
+                No API keys yet. Create one to point your agents at the gateway.
+              </div>
+            )}
           </div>
         </Panel>
+
         <Panel className="lg:col-span-2">
-          <SectionTitle icon={<Key className="w-3 h-3" />} label="API Keys" />
-          <div className="space-y-2">
-            <ApiKeyRow name="Production Gateway Key" value="ask_prod_7f3a9c2e1b8d4f6a" created="2026-08-14" />
-            <ApiKeyRow name="Staging Gateway Key" value="ask_stag_2b9e1f4a7c3d8e5b" created="2026-09-01" />
+          <SectionTitle
+            icon={<ShieldCheck className="w-3 h-3" />}
+            label="Advanced Security"
+          />
+          <div className="flex items-center justify-between py-2">
+            <div className="flex-1">
+              <div className="text-[10px] font-mono text-slate-300">
+                Two-Factor Authentication
+              </div>
+              <div className="text-[9px] font-mono text-slate-600 mt-0.5">
+                Protect your account with TOTP. Compatible with Google
+                Authenticator, 1Password, Authy.
+              </div>
+            </div>
+            <Link
+              href="/settings/security"
+              className="text-[10px] font-mono tracking-widest uppercase text-cyan-400 hover:text-cyan-300 border border-cyan-400/40 hover:border-cyan-400/80 px-3 py-1.5 transition-colors"
+            >
+              Configure →
+            </Link>
           </div>
         </Panel>
       </div>
@@ -2045,44 +3434,90 @@ function SettingsPage() {
   );
 }
 
-function ToggleRow({ label, description, value, onChange }: {
-  label: string; description: string; value: boolean; onChange: (v: boolean) => void;
+function ToggleRow({
+  label,
+  description,
+  value,
+  loading,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: boolean;
+  loading?: boolean;
+  onChange: (v: boolean) => void;
 }) {
   return (
     <div className="flex items-center justify-between py-2 border-b border-emerald-500/5 last:border-0">
       <div className="flex-1">
         <div className="text-[10px] font-mono text-slate-300">{label}</div>
-        <div className="text-[9px] font-mono text-slate-600 mt-0.5">{description}</div>
+        <div className="text-[9px] font-mono text-slate-600 mt-0.5">
+          {description}
+        </div>
       </div>
-      <button onClick={() => onChange(!value)} className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-emerald-500/30" : "bg-slate-700/50"}`}>
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${value ? "left-[22px] bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]" : "left-0.5 bg-slate-500"}`} />
+      <button
+        onClick={() => onChange(!value)}
+        disabled={loading}
+        className={`relative w-10 h-5 rounded-full transition-colors disabled:opacity-50 ${
+          value ? "bg-emerald-500/30" : "bg-slate-700/50"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${
+            value
+              ? "left-[22px] bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]"
+              : "left-0.5 bg-slate-500"
+          }`}
+        />
       </button>
     </div>
   );
 }
 
-function ApiKeyRow({ name, value, created }: { name: string; value: string; created: string }) {
-  const [revealed, setRevealed] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const handleCopy = async () => {
-    await copyToClipboard(value);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
+function ApiKeyRow({
+  name,
+  prefix,
+  created,
+  lastUsed,
+  revoked,
+  onRevoke,
+}: {
+  name: string;
+  prefix: string;
+  created: string;
+  lastUsed: string | null;
+  revoked: boolean;
+  onRevoke: () => void;
+}) {
   return (
-    <div className="flex items-center gap-3 bg-black/50 border border-emerald-500/10 p-3">
+    <div
+      className={`flex items-center gap-3 bg-black/50 border p-3 ${
+        revoked ? "border-slate-700/40 opacity-50" : "border-emerald-500/10"
+      }`}
+    >
       <Key className="w-3.5 h-3.5 text-emerald-400/60 shrink-0" />
       <div className="flex-1 min-w-0">
-        <div className="text-[10px] font-mono text-slate-300">{name}</div>
-        <div className="text-[9px] font-mono text-slate-500 mt-0.5">{revealed ? value : "•".repeat(value.length)}</div>
-        <div className="text-[8px] font-mono text-slate-700 mt-0.5">Created {created}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-[10px] font-mono text-slate-300">{name}</div>
+          {revoked && <Badge color="#f43f5e">revoked</Badge>}
+        </div>
+        <div className="text-[9px] font-mono text-slate-500 mt-0.5">
+          {prefix}
+        </div>
+        <div className="text-[8px] font-mono text-slate-700 mt-0.5">
+          Created {created}
+          {lastUsed && ` · Last used ${lastUsed}`}
+        </div>
       </div>
-      <button onClick={() => setRevealed(!revealed)} className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-emerald-400 transition-colors">
-        {revealed ? <Unlock className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
-      </button>
-      <button onClick={handleCopy} className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-emerald-400 transition-colors">
-        {copied ? <CheckCircle className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-      </button>
+      {!revoked && (
+        <button
+          onClick={onRevoke}
+          className="w-6 h-6 flex items-center justify-center text-slate-500 hover:text-rose-400 transition-colors"
+          title="Revoke"
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
+      )}
     </div>
   );
 }
@@ -2634,7 +4069,7 @@ export default function Dashboard() {
       {view === "audit" && <AuditPage events={events} />}
       {view === "agents" && <AgentsPage onToast={push} />}
       {view === "webhooks" && <WebhooksPage onToast={push} />}
-      {view === "settings" && <SettingsPage />}
+      {view === "settings" && <SettingsPage onToast={push} />}
 
       {flashKey > 0 && (
         <div key={flashKey}

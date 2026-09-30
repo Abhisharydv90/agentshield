@@ -74,15 +74,20 @@ const nextConfig: NextConfig = {
   },
 
   /* --- API proxy: forward /api/* and /v1/* to the FastAPI backend --- */
-    async rewrites() {
+      async rewrites() {
+    const isProd = process.env.NODE_ENV === "production";
+    const backend = isProd
+      ? "https://agentshield-production-0091.up.railway.app"
+      : "http://localhost:8000";
+
     return [
       {
         source: "/api/:path*",
-        destination: "https://agentshield-production-0091.up.railway.app/api/:path*",
+        destination: `${backend}/api/:path*`,
       },
       {
         source: "/v1/:path*",
-        destination: "https://agentshield-production-0091.up.railway.app/v1/:path*",
+        destination: `${backend}/v1/:path*`,
       },
     ];
   },
