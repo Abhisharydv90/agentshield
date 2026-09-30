@@ -213,6 +213,7 @@ async def _resolve_session(request: Request) -> tuple[User, Tenant]:
 
     return user, tenant
 
+
 # ============================================================
 # Auth token helpers (password reset + email verification)
 # ============================================================
@@ -281,6 +282,7 @@ async def _invalidate_other_tokens(
         )
         .values(used_at=datetime.now(timezone.utc))
     )
+
 
 # ============================================================
 # Schemas
@@ -408,7 +410,7 @@ async def signup(req: SignupRequest, request: Request, response: Response) -> di
         session.add(user)
         await session.flush()
 
-                # Issue the tenant's first API key
+        # Issue the tenant's first API key
         raw_key = generate_key(live=False)
         api_key = APIKey(
             tenant_id=tenant.tenant_id,
@@ -431,10 +433,9 @@ async def signup(req: SignupRequest, request: Request, response: Response) -> di
         user_email = user.email
 
         await session.commit()
-
         user_payload = _user_payload(user, tenant)
 
-        # Audit log (best effort)
+    # Audit log (best effort)
     await _write_auth_event(
         tenant_id=tenant.tenant_id,
         category="other",
@@ -446,10 +447,6 @@ async def signup(req: SignupRequest, request: Request, response: Response) -> di
     verify_url = f"{settings.APP_BASE_URL}/verify-email?token={verify_raw}"
     html, text = email_verification_email(user_name, verify_url)
     send_email(user_email, "Verify your AgentShield email", html, text)
-
-    # Session cookie
-    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
-    _set_session_cookie(response, token)
 
     # Session cookie
     token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
@@ -830,6 +827,7 @@ async def complete_2fa(
     _set_session_cookie(response, token)
 
     return {"user": user_payload, "requires_2fa": False}
+
 
 # ============================================================
 # Password reset
