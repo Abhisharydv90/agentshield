@@ -184,32 +184,148 @@ def _user_payload(user: User, tenant: Tenant) -> dict[str, Any]:
     }
 
 
-async def _resolve_session(request: Request) -> tuple[User, Tenant]:
-    """Return the (user, tenant) for the current session, or raise 401."""
+async def _resolve_session(
+    request: Request,
+) -> tuple[User, Tenant]:
+    """
+    Resolve and validate the authenticated browser session.
+
+    Cryptographic validation happens first through the JWT decoder.
+
+    Database validation then checks:
+
+    - user exists
+    - user is active
+    - tenant exists
+    - tenant is active
+    - JWT user ID matches database user
+    - JWT tenant ID matches database tenant
+    - JWT session_version matches the current database version
+
+    The final check gives us server-side session revocation.
+    """
+
     raw = request.cookies.get(COOKIE_NAME)
+
     if not raw:
-        raise HTTPException(status_code=401, detail="not_authenticated")
+        raise HTTPException(
+            status_code=401,
+            detail="not_authenticated",
+        )
 
     payload = decode_session_token(raw)
+
     if payload is None:
-        raise HTTPException(status_code=401, detail="session_expired")
+        raise HTTPException(
+            status_code=401,
+            detail="invalid_session",
+        )
+
+    # ---------------------------------------------------------
+    # Validate UUIDs before touching the database.
+    # ---------------------------------------------------------
+
+    try:
+        user_id = uuid.UUID(
+            str(payload["sub"])
+        )
+
+        tenant_id = uuid.UUID(
+            str(payload["tenant_id"])
+        )
+
+    except (
+        KeyError,
+        ValueError,
+        TypeError,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid_session",
+        )
+
+    token_session_version = payload.get(
+        "session_version"
+    )
+
+    if not isinstance(
+        token_session_version,
+        int,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid_session",
+        )
+
+    # ---------------------------------------------------------
+    # Database validation
+    # ---------------------------------------------------------
 
     async with async_session() as session:
+
         user = (
             await session.execute(
-                select(User).where(User.user_id == uuid.UUID(payload["sub"]))
+                select(User).where(
+                    User.user_id == user_id
+                )
             )
         ).scalar_one_or_none()
-        if user is None or user.status != "active":
-            raise HTTPException(status_code=401, detail="user_inactive")
+
+        if user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid_session",
+            )
+
+        if user.status != "active":
+            raise HTTPException(
+                status_code=401,
+                detail="user_inactive",
+            )
+
+        # -----------------------------------------------------
+        # Server-side session revocation
+        # -----------------------------------------------------
+
+        if (
+            user.session_version
+            != token_session_version
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="session_revoked",
+            )
+
+        # -----------------------------------------------------
+        # Tenant must match the token.
+        # -----------------------------------------------------
+
+        if user.tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid_session",
+            )
 
         tenant = (
             await session.execute(
-                select(Tenant).where(Tenant.tenant_id == user.tenant_id)
+                select(Tenant).where(
+                    Tenant.tenant_id
+                    == user.tenant_id
+                )
             )
         ).scalar_one_or_none()
-        if tenant is None or tenant.status != "active":
-            raise HTTPException(status_code=401, detail="tenant_inactive")
+
+        if tenant is None:
+            raise HTTPException(
+                status_code=401,
+                detail="invalid_session",
+            )
+
+        if tenant.status != "active":
+            raise HTTPException(
+                status_code=401,
+                detail="tenant_inactive",
+            )
 
     return user, tenant
 
@@ -449,7 +565,13 @@ async def signup(req: SignupRequest, request: Request, response: Response) -> di
     send_email(user_email, "Verify your AgentShield email", html, text)
 
     # Session cookie
-    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
+    token = create_session_token(
+    user.user_id,
+    tenant.tenant_id,
+    user.email,
+    user.role,
+    session_version=user.session_version,
+)
     _set_session_cookie(response, token)
 
     return {
@@ -577,7 +699,13 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
         reasoning=f"login: {meta['ip']} · {meta['user_agent'][:60]}",
     )
 
-    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
+    token = create_session_token(
+    user.user_id,
+    tenant.tenant_id,
+    user.email,
+    user.role,
+    session_version=user.session_version,
+)
     _set_session_cookie(response, token)
 
     return {"user": user_payload, "requires_2fa": False}
@@ -610,7 +738,13 @@ async def me(request: Request) -> UserOut:
 @router.post("/refresh")
 async def refresh(request: Request, response: Response) -> dict:
     user, tenant = await _resolve_session(request)
-    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
+    token = create_session_token(
+    user.user_id,
+    tenant.tenant_id,
+    user.email,
+    user.role,
+    session_version=user.session_version,
+)
     _set_session_cookie(response, token)
     return {"ok": True, "user": _user_payload(user, tenant)}
 
@@ -636,7 +770,13 @@ async def change_password(
         if verify_password(req.new_password, db_user.password_hash):
             raise HTTPException(status_code=400, detail="password_unchanged")
 
-        db_user.password_hash = hash_password(req.new_password)
+        db_user.password_hash = hash_password(
+            req.new_password
+        )
+
+        db_user.session_version += 1
+
+        
         await session.commit()
 
     await _write_auth_event(
@@ -648,7 +788,13 @@ async def change_password(
 
     # Rotate the session cookie
     _delete_session_cookie(response)
-    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
+    token = create_session_token(
+    user.user_id,
+    tenant.tenant_id,
+    user.email,
+    user.role,
+    session_version=user.session_version,
+)
     _set_session_cookie(response, token)
 
     return {"ok": True}
@@ -823,7 +969,13 @@ async def complete_2fa(
         reasoning="2fa_challenge_success",
     )
 
-    token = create_session_token(user.user_id, tenant.tenant_id, user.email, user.role)
+    token = create_session_token(
+    user.user_id,
+    tenant.tenant_id,
+    user.email,
+    user.role,
+    session_version=user.session_version,
+)
     _set_session_cookie(response, token)
 
     return {"user": user_payload, "requires_2fa": False}
@@ -887,8 +1039,15 @@ async def reset_password(req: ResetPasswordRequest) -> dict:
         if user is None or user.status != "active":
             raise HTTPException(status_code=400, detail="invalid_token")
 
-        user.password_hash = hash_password(req.new_password)
-        # Clear lockout — user proved email control.
+        user.password_hash = hash_password(
+             req.new_password
+        )  
+        # Password reset is a security boundary.
+        # Every previously issued browser session must
+        # become invalid immediately.
+        user.session_version += 1
+
+        # Clear brute-force lockout.
         user.failed_login_attempts = 0
         user.locked_until = None
 

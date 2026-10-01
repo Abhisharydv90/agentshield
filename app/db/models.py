@@ -130,10 +130,31 @@ class User(Base):
 
     # --- Brute-force lockout (added for auth hardening) ---
     failed_login_attempts: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0", nullable=False
+            Integer,
+            default=0,
+            server_default="0",
+            nullable=False,
     )
+
     locked_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+             DateTime(timezone=True),
+             nullable=True,
+    )
+
+    # ---------------------------------------------------------
+    # Session revocation
+    # ---------------------------------------------------------
+    #
+    # Every authenticated session contains the value of this
+    # counter at the time the session was created.
+    #
+    # Incrementing this value invalidates every older session.
+    #
+    session_version: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
     )
 
 
