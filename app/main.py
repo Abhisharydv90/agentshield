@@ -242,18 +242,21 @@ class TraceMiddleware:
 # Auth innermost so it wraps only the routes that actually need identity.
 # ============================================================
 
-_allowed_hosts = ["*"] if not _is_prod else [
-    "agentshield.app",
-    "*.agentshield.app",
-    "*.up.railway.app",
-    "*.vercel.app",
-]
+_allowed_hosts = (
+    ["*"]
+    if not _is_prod
+    else settings.trusted_hosts
+)
 
-_prod_origins = [
-    "https://agentshield.app",
-    "https://www.agentshield.app",
-    "https://agentshield-woad.vercel.app",
-]
+_prod_origins = (
+    settings.cors_origins
+    if _is_prod
+    else [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+    ]
+)
 _dev_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
