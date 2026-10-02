@@ -2,34 +2,12 @@
 AgentShield — application entrypoint.
 
 Wires together:
-
-    - FastAPI application
-    - Database/Redis startup checks
-    - Trace middleware
-    - Rate limiting
-    - Trusted hosts
-    - CORS
-    - CSRF
-    - Authentication
-    - Telemetry
-    - Runtime proxy
-    - Tenant management
-    - Authentication endpoints
-
-Important response contract:
-
-HTTPException detail may be either:
-
-    "some_error"
-
-or:
-
-    {
-        "error": "some_error",
-        ...
-    }
-
-The global exception handler preserves structured error details.
+  - FastAPI app with lifespan management
+  - Middleware stack: trace, rate limit, trusted hosts, CORS, CSRF, auth
+  - Routers: telemetry, proxy, auth, tenant, meta
+  - Global exception handlers with structured JSON responses
+  - Explicit fail-closed PII vault error handling
+  - Dev-only routes (gated behind settings.ENV != "prod")
 """
 
 from __future__ import annotations
@@ -50,6 +28,7 @@ from app.config import settings
 from app.middleware.auth import AuthMiddleware
 from app.middleware.csrf import CSRFMiddleware
 from app.middleware.ratelimit import RateLimitMiddleware
+from app.security.pii.vault import PIIVaultUnavailableError
 
 
 # ============================================================
@@ -63,17 +42,13 @@ logging.basicConfig(
         logging.INFO,
     ),
     format=(
-        "%(asctime)s | "
-        "%(levelname)-7s | "
-        "%(name)-20s | "
-        "%(message)s"
+        "%(asctime)s | %(levelname)-7s | "
+        "%(name)-20s | %(message)s"
     ),
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-log = logging.getLogger(
-    "agentshield"
-)
+log = logging.getLogger("agentshield")
 
 
 # ============================================================
@@ -96,60 +71,44 @@ async def lifespan(
     log.info("=" * 62)
 
     # --------------------------------------------------------
-    # PostgreSQL
+    # PostgreSQL connectivity
     # --------------------------------------------------------
 
     try:
-
         from sqlalchemy import text
-
         from app.db.session import async_session
 
         async with async_session() as session:
-
             await session.execute(
                 text("SELECT 1")
             )
 
-        log.info(
-            "✓ Postgres reachable"
-        )
+        log.info("✓ Postgres reachable")
 
     except Exception as exc:
-
         log.warning(
             "✗ Postgres unreachable — %s",
             exc,
         )
 
     # --------------------------------------------------------
-    # Redis
+    # Redis connectivity
     # --------------------------------------------------------
 
     try:
+        from app.security.pii.vault import _get_redis
 
-        from app.security.pii.vault import (
-            _get_redis,
-        )
+        redis_client = _get_redis()
 
-        redis = _get_redis()
-
-        if redis is not None:
-
-            await redis.ping()
-
-            log.info(
-                "✓ Redis reachable"
-            )
-
+        if redis_client is not None:
+            await redis_client.ping()
+            log.info("✓ Redis reachable")
         else:
-
             log.warning(
                 "✗ Redis client failed to initialize"
             )
 
     except Exception as exc:
-
         log.warning(
             "✗ Redis unreachable — %s",
             exc,
@@ -163,36 +122,23 @@ async def lifespan(
 
 
 # ============================================================
-# Application
+# App
 # ============================================================
 
 _is_prod = settings.ENV == "prod"
-
 
 app = FastAPI(
     title="AgentShield",
     version="0.2.0",
     description=(
         "Autonomous Agent Firewall & Evaluation Gateway. "
-        "A zero-trust proxy that intercepts, evaluates, "
-        "and secures bidirectional traffic between AI "
-        "agents, LLM providers, and enterprise tools."
+        "A zero-trust proxy that intercepts, evaluates, and secures "
+        "bidirectional traffic between AI agents, LLM providers, "
+        "and enterprise tools."
     ),
-    docs_url=(
-        None
-        if _is_prod
-        else "/docs"
-    ),
-    redoc_url=(
-        None
-        if _is_prod
-        else "/redoc"
-    ),
-    openapi_url=(
-        None
-        if _is_prod
-        else "/openapi.json"
-    ),
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
     lifespan=lifespan,
 )
 
@@ -202,17 +148,12 @@ app = FastAPI(
 # ============================================================
 
 class TraceMiddleware:
-    """
-    Pure ASGI trace middleware.
-
-    Safe for SSE and streaming responses.
-    """
+    """Pure ASGI middleware. Safe for SSE / chunked responses."""
 
     def __init__(
         self,
         app: Any,
     ) -> None:
-
         self.app = app
 
     async def __call__(
@@ -223,35 +164,21 @@ class TraceMiddleware:
     ) -> None:
 
         if scope["type"] != "http":
-
             await self.app(
                 scope,
                 receive,
                 send,
             )
-
             return
 
         headers = {
-            key.decode(
-                "latin-1"
-            ).lower():
-                value.decode(
-                    "latin-1"
-                )
+            key.decode().lower(): value.decode()
             for key, value
-            in scope.get(
-                "headers",
-                [],
-            )
+            in scope.get("headers", [])
         }
 
-        incoming_trace_id = headers.get(
-            "x-trace-id"
-        )
-
         trace_id = (
-            incoming_trace_id
+            headers.get("x-trace-id")
             or str(uuid.uuid4())
         )
 
@@ -264,42 +191,28 @@ class TraceMiddleware:
 
         start = time.perf_counter()
 
-        status_code_holder: dict[
-            str,
-            int,
-        ] = {
-            "code": 0
+        status_code_holder: dict[str, int] = {
+            "code": 0,
         }
 
         async def send_wrapper(
             message: dict,
         ) -> None:
 
-            if (
-                message["type"]
-                == "http.response.start"
-            ):
+            if message["type"] == "http.response.start":
 
-                status_code_holder[
-                    "code"
-                ] = message.get(
-                    "status",
-                    0,
+                status_code_holder["code"] = (
+                    message.get("status", 0)
                 )
 
                 response_headers = list(
-                    message.get(
-                        "headers",
-                        [],
-                    )
+                    message.get("headers", [])
                 )
 
                 response_headers.append(
                     (
                         b"x-trace-id",
-                        trace_id.encode(
-                            "utf-8"
-                        ),
+                        trace_id.encode(),
                     )
                 )
 
@@ -311,19 +224,13 @@ class TraceMiddleware:
                 response_headers.append(
                     (
                         b"x-response-time",
-                        f"{duration_ms:.2f}ms".encode(
-                            "utf-8"
-                        ),
+                        f"{duration_ms:.2f}ms".encode(),
                     )
                 )
 
-                message[
-                    "headers"
-                ] = response_headers
+                message["headers"] = response_headers
 
-            await send(
-                message
-            )
+            await send(message)
 
         try:
 
@@ -350,16 +257,14 @@ class TraceMiddleware:
                 "",
             )
 
-            status_code = (
-                status_code_holder[
-                    "code"
-                ]
+            code = (
+                status_code_holder["code"]
                 or 500
             )
 
             level = (
                 logging.WARNING
-                if status_code >= 400
+                if code >= 400
                 else logging.INFO
             )
 
@@ -368,33 +273,29 @@ class TraceMiddleware:
                 "%s %s · %d · %.2fms · trace=%s",
                 method,
                 path,
-                status_code,
+                code,
                 duration_ms,
                 trace_id,
             )
 
 
 # ============================================================
-# Middleware configuration
+# Middleware stack
 #
-# Starlette add_middleware() prepends middleware.
-#
-# LAST added = OUTERMOST.
-#
-# Execution:
+# Execution order:
 #
 #   Trace
-#      ↓
+#     ↓
 #   RateLimit
-#      ↓
+#     ↓
 #   TrustedHost
-#      ↓
+#     ↓
 #   CORS
-#      ↓
+#     ↓
 #   CSRF
-#      ↓
+#     ↓
 #   Auth
-#      ↓
+#     ↓
 #   Routes
 # ============================================================
 
@@ -409,33 +310,30 @@ _allowed_hosts = (
     ]
 )
 
+_prod_origins = [
+    "https://agentshield.app",
+    "https://www.agentshield.app",
+    "https://agentshield-woad.vercel.app",
+]
 
-if _is_prod:
+_dev_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+]
 
-    _allow_origins = [
-        "https://agentshield.app",
-        "https://www.agentshield.app",
-        "https://agentshield-woad.vercel.app",
-    ]
+_allow_origins = (
+    _prod_origins
+    if _is_prod
+    else _dev_origins
+)
 
-    _allow_origin_regex = (
-        r"https://.*\.vercel\.app"
-    )
+_allow_origin_regex = (
+    r"https://.*\.vercel\.app"
+    if _is_prod
+    else None
+)
 
-else:
-
-    _allow_origins = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-    ]
-
-    _allow_origin_regex = None
-
-
-# ------------------------------------------------------------
-# Inner → outer
-# ------------------------------------------------------------
 
 app.add_middleware(
     AuthMiddleware
@@ -480,8 +378,54 @@ app.add_middleware(
 
 
 # ============================================================
-# HTTP exception handler
+# Exception handlers
 # ============================================================
+
+@app.exception_handler(
+    PIIVaultUnavailableError
+)
+async def pii_vault_exception_handler(
+    request: Request,
+    exc: PIIVaultUnavailableError,
+) -> JSONResponse:
+    """
+    Convert PII-vault failures into an explicit 503.
+
+    Security invariant:
+
+        PII vault unavailable
+            ->
+        request stops
+            ->
+        upstream LLM is never contacted
+    """
+
+    trace_id = getattr(
+        request.state,
+        "trace_id",
+        None,
+    )
+
+    log.error(
+        "PII vault unavailable · path=%s · trace=%s · reason=%s",
+        request.url.path,
+        trace_id,
+        exc,
+    )
+
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "pii_vault_unavailable",
+            "status": 503,
+            "message": (
+                "PII protection is temporarily unavailable. "
+                "The request was not forwarded."
+            ),
+            "trace_id": trace_id,
+        },
+    )
+
 
 @app.exception_handler(
     StarletteHTTPException
@@ -499,71 +443,63 @@ async def http_exception_handler(
 
     detail = exc.detail
 
-    # --------------------------------------------------------
-    # Structured error
+    # Preserve structured application errors exactly.
     #
-    # Preserve dictionary details rather than wrapping them
-    # inside {"error": "http_error", "detail": ...}.
-    # --------------------------------------------------------
+    # Example:
+    #   HTTPException(
+    #       status_code=403,
+    #       detail={
+    #           "error": "capability_required",
+    #           "capability": "agent:invoke",
+    #       },
+    #   )
+    #
+    # must remain:
+    #
+    #   {
+    #       "error": "capability_required",
+    #       ...
+    #   }
+    #
+    # rather than becoming:
+    #
+    #   {
+    #       "error": "http_error",
+    #       "detail": {...}
+    #   }
 
-    if isinstance(
-        detail,
-        dict,
-    ):
+    if isinstance(detail, dict):
 
-        body = dict(
-            detail
+        body = dict(detail)
+
+        body.setdefault(
+            "status",
+            exc.status_code,
         )
 
-        # Ensure a stable top-level error exists.
-        if not body.get(
-            "error"
-        ):
+    elif isinstance(detail, str):
 
-            body["error"] = (
-                "http_error"
-            )
-
-        body["status"] = (
-            exc.status_code
-        )
-
-    # --------------------------------------------------------
-    # String error
-    # --------------------------------------------------------
+        body = {
+            "error": detail,
+            "status": exc.status_code,
+        }
 
     else:
 
         body = {
-            "error":
-                str(detail),
-            "status":
-                exc.status_code,
+            "error": "http_error",
+            "status": exc.status_code,
+            "detail": detail,
         }
 
-    # --------------------------------------------------------
-    # Trace ID
-    # --------------------------------------------------------
-
     if trace_id:
-
-        body["trace_id"] = (
-            trace_id
-        )
+        body["trace_id"] = trace_id
 
     return JSONResponse(
         status_code=exc.status_code,
         content=body,
-        headers={
-            "Cache-Control":
-                "no-store",
-        },
     )
 
-
-# ============================================================
-# Unexpected exception handler
-# ============================================================
 
 @app.exception_handler(
     Exception
@@ -589,19 +525,12 @@ async def unhandled_exception_handler(
     return JSONResponse(
         status_code=500,
         content={
-            "error":
-                "internal_server_error",
-            "trace_id":
-                trace_id,
-            "message":
-                (
-                    "An unexpected error occurred. "
-                    "Contact support with the trace ID."
-                ),
-        },
-        headers={
-            "Cache-Control":
-                "no-store",
+            "error": "internal_server_error",
+            "trace_id": trace_id,
+            "message": (
+                "An unexpected error occurred. "
+                "Contact support with the trace ID."
+            ),
         },
     )
 
@@ -645,7 +574,7 @@ app.include_router(
 
 
 # ============================================================
-# Root / metadata
+# Meta endpoints
 # ============================================================
 
 @app.get(
@@ -653,57 +582,36 @@ app.include_router(
     tags=["meta"],
 )
 async def root() -> dict:
-
     return {
-        "service":
-            "agentshield",
-        "version":
-            app.version,
-        "description":
-            (
-                "Autonomous Agent Firewall "
-                "& Evaluation Gateway"
-            ),
-        "docs":
-            (
-                "/docs"
-                if not _is_prod
-                else None
-            ),
-        "health":
-            "/health",
-        "readiness":
-            "/ready",
-        "api":
-            "/v1",
+        "service": "agentshield",
+        "version": app.version,
+        "description": (
+            "Autonomous Agent Firewall & "
+            "Evaluation Gateway"
+        ),
+        "docs": (
+            "/docs"
+            if not _is_prod
+            else None
+        ),
+        "health": "/health",
+        "readiness": "/ready",
+        "api": "/v1",
     }
 
-
-# ============================================================
-# Health
-# ============================================================
 
 @app.get(
     "/health",
     tags=["meta"],
 )
 async def health() -> dict:
-
     return {
-        "status":
-            "ok",
-        "env":
-            settings.ENV,
-        "service":
-            settings.SERVICE_NAME,
-        "version":
-            app.version,
+        "status": "ok",
+        "env": settings.ENV,
+        "service": settings.SERVICE_NAME,
+        "version": app.version,
     }
 
-
-# ============================================================
-# Readiness
-# ============================================================
 
 @app.get(
     "/ready",
@@ -711,37 +619,22 @@ async def health() -> dict:
 )
 async def readiness() -> JSONResponse:
 
-    checks: dict[
-        str,
-        bool,
-    ] = {
-        "postgres":
-            False,
-        "redis":
-            False,
+    checks: dict[str, bool] = {
+        "postgres": False,
+        "redis": False,
     }
-
-    # --------------------------------------------------------
-    # PostgreSQL
-    # --------------------------------------------------------
 
     try:
 
         from sqlalchemy import text
-
-        from app.db.session import (
-            async_session,
-        )
+        from app.db.session import async_session
 
         async with async_session() as session:
-
             await session.execute(
                 text("SELECT 1")
             )
 
-        checks[
-            "postgres"
-        ] = True
+        checks["postgres"] = True
 
     except Exception as exc:
 
@@ -750,25 +643,15 @@ async def readiness() -> JSONResponse:
             exc,
         )
 
-    # --------------------------------------------------------
-    # Redis
-    # --------------------------------------------------------
-
     try:
 
-        from app.security.pii.vault import (
-            _get_redis,
-        )
+        from app.security.pii.vault import _get_redis
 
-        redis = _get_redis()
+        redis_client = _get_redis()
 
-        if redis is not None:
-
-            await redis.ping()
-
-            checks[
-                "redis"
-            ] = True
+        if redis_client is not None:
+            await redis_client.ping()
+            checks["redis"] = True
 
     except Exception as exc:
 
@@ -788,50 +671,26 @@ async def readiness() -> JSONResponse:
             else 503
         ),
         content={
-            "status":
-                (
-                    "ready"
-                    if all_ok
-                    else "not_ready"
-                ),
-            "checks":
-                checks,
-            "version":
-                app.version,
+            "status": (
+                "ready"
+                if all_ok
+                else "not_ready"
+            ),
+            "checks": checks,
+            "version": app.version,
         },
     )
 
 
 # ============================================================
-# Development-only routes
+# Dev-only routes
 # ============================================================
 
 if not _is_prod:
 
     from sqlalchemy import (
-        desc,
         select,
-    )
-
-    from app.db.models import (
-        SecurityEvent,
-        Tenant,
-    )
-
-    from app.db.session import (
-        async_session,
-    )
-
-    from app.policy.dsl import (
-        EXAMPLE_POLICY,
-    )
-
-    from app.policy.engine import (
-        evaluate_policy,
-    )
-
-    from app.security.judge.contract import (
-        NormalizedToolCall,
+        desc,
     )
 
     from app.security.judge.evaluate import (
@@ -842,24 +701,45 @@ if not _is_prod:
         normalize_tool_call,
     )
 
+    from app.security.judge.contract import (
+        NormalizedToolCall,
+    )
+
     from app.security.judge.stream_buffer import (
         StreamingToolCallGate,
+    )
+
+    from app.policy.dsl import (
+        EXAMPLE_POLICY,
+    )
+
+    from app.policy.engine import (
+        evaluate_policy,
+    )
+
+    from app.db.session import (
+        async_session,
     )
 
     from app.telemetry.audit import (
         write_event,
     )
 
-    async def _first_tenant_id():
+    from app.db.models import (
+        SecurityEvent,
+        Tenant,
+    )
 
+
+    async def _first_tenant_id():
+        """
+        Dev helper — grab any tenant for audit writes.
+        """
         async with async_session() as session:
 
             row = (
                 await session.execute(
-                    select(
-                        Tenant
-                    )
-                    .limit(1)
+                    select(Tenant).limit(1)
                 )
             ).scalar_one_or_none()
 
@@ -877,47 +757,36 @@ if not _is_prod:
     async def test_judge() -> dict:
 
         malicious_call = {
-            "name":
-                "db.query",
+            "name": "db.query",
             "args": {
-                "query":
-                    (
-                        "SELECT * FROM users; "
-                        "DROP TABLE users; --"
-                    )
+                "query": (
+                    "SELECT * FROM users; "
+                    "DROP TABLE users; --"
+                )
             },
         }
 
-        normalized = (
-            normalize_tool_call(
-                malicious_call
-            )
+        normalized = normalize_tool_call(
+            malicious_call
         )
 
         try:
 
-            normalized_call = (
-                NormalizedToolCall(
-                    **normalized
-                )
+            nc = NormalizedToolCall(
+                **normalized
             )
 
             return {
-                "status":
-                    "allowed (BUG!)",
-                "normalized":
-                    normalized_call.model_dump(),
+                "status": "allowed (BUG!)",
+                "normalized": nc.model_dump(),
             }
 
         except ValueError:
 
             return {
-                "status":
-                    "blocked",
-                "reason":
-                    "smuggling_detected",
-                "normalized":
-                    normalized,
+                "status": "blocked",
+                "reason": "smuggling_detected",
+                "normalized": normalized,
             }
 
 
@@ -928,85 +797,69 @@ if not _is_prod:
     async def test_policy() -> dict:
 
         malicious = {
-            "name":
-                "db.query",
+            "name": "db.query",
             "args": {
-                "query":
-                    (
-                        "SELECT * FROM users; "
-                        "DROP TABLE users; --"
-                    )
+                "query": (
+                    "SELECT * FROM users; "
+                    "DROP TABLE users; --"
+                )
             },
         }
 
         benign = {
-            "name":
-                "db.query",
+            "name": "db.query",
             "args": {
-                "query":
-                    "SELECT * FROM billing_invoices",
-                "table":
-                    "billing_invoices",
+                "query": (
+                    "SELECT * FROM billing_invoices"
+                ),
+                "table": "billing_invoices",
             },
         }
 
-        normalized_malicious = (
-            normalize_tool_call(
-                malicious
-            )
+        nm = normalize_tool_call(
+            malicious
         )
 
-        normalized_benign = (
-            normalize_tool_call(
-                benign
-            )
+        nb = normalize_tool_call(
+            benign
         )
 
-        results: dict[
-            str,
-            Any,
-        ] = {}
+        results: dict[str, Any] = {}
 
         try:
 
             NormalizedToolCall(
-                **normalized_malicious
+                **nm
             )
 
-            results[
-                "malicious"
-            ] = (
+            results["malicious"] = (
                 "BUG: Normalizer allowed it!"
             )
 
         except ValueError:
 
-            results[
-                "malicious"
-            ] = (
+            results["malicious"] = (
                 "BLOCKED BY NORMALIZER"
             )
 
         try:
 
-            normalized_call = (
-                NormalizedToolCall(
-                    **normalized_benign
-                )
+            nc = NormalizedToolCall(
+                **nb
             )
 
-            results[
-                "benign"
-            ] = evaluate_policy(
-                normalized_call,
-                EXAMPLE_POLICY,
-            ).model_dump()
+            results["benign"] = (
+                evaluate_policy(
+                    nc,
+                    EXAMPLE_POLICY,
+                ).model_dump()
+            )
 
         except Exception as exc:
 
-            results[
-                "benign"
-            ] = str(exc)
+            results["benign"] = (
+                f"ERROR: {exc}"
+            )
 
         return results
 
@@ -1017,11 +870,10 @@ if not _is_prod:
     )
     async def test_stream_buffer() -> dict:
 
-        gate = (
-            StreamingToolCallGate()
-        )
+        gate = StreamingToolCallGate()
 
         chunks = [
+
             {
                 "choices": [
                     {
@@ -1029,25 +881,22 @@ if not _is_prod:
                             "tool_calls": [
                                 {
                                     "index": 0,
-                                    "id":
-                                        "call_1",
+                                    "id": "call_1",
                                     "function": {
-                                        "name":
-                                            "db.query",
-                                        "arguments":
-                                            (
-                                                '{"query": '
-                                                '"SELECT * '
-                                            ),
+                                        "name": "db.query",
+                                        "arguments": (
+                                            "{\"query\": "
+                                            "\"SELECT * "
+                                        ),
                                     },
                                 }
-                            ],
+                            ]
                         },
-                        "finish_reason":
-                            None,
+                        "finish_reason": None,
                     }
                 ]
             },
+
             {
                 "choices": [
                     {
@@ -1056,20 +905,19 @@ if not _is_prod:
                                 {
                                     "index": 0,
                                     "function": {
-                                        "arguments":
-                                            (
-                                                "FROM users; "
-                                                "DROP "
-                                            ),
+                                        "arguments": (
+                                            "FROM users; "
+                                            "DROP "
+                                        ),
                                     },
                                 }
-                            ],
+                            ]
                         },
-                        "finish_reason":
-                            None,
+                        "finish_reason": None,
                     }
                 ]
             },
+
             {
                 "choices": [
                     {
@@ -1078,32 +926,26 @@ if not _is_prod:
                                 {
                                     "index": 0,
                                     "function": {
-                                        "arguments":
-                                            (
-                                                "TABLE users; "
-                                                '--"}'
-                                            ),
+                                        "arguments": (
+                                            "TABLE users; "
+                                            "--\\\"}"
+                                        ),
                                     },
                                 }
-                            ],
+                            ]
                         },
-                        "finish_reason":
-                            "tool_calls",
+                        "finish_reason": "tool_calls",
                     }
                 ]
             },
         ]
 
-        accumulated: list[
-            dict
-        ] = []
+        accumulated: list[dict] = []
 
         for chunk in chunks:
 
-            _, completed = (
-                gate.feed(
-                    chunk
-                )
+            _, completed = gate.feed(
+                chunk
             )
 
             accumulated.extend(
@@ -1111,8 +953,9 @@ if not _is_prod:
             )
 
         return {
-            "completed_tool_calls":
-                accumulated,
+            "completed_tool_calls": (
+                accumulated
+            )
         }
 
 
@@ -1127,48 +970,46 @@ if not _is_prod:
         )
 
         if tenant_id is None:
-
             return {
-                "error":
-                    "no_tenant_in_db"
+                "error": "no_tenant_in_db"
             }
 
         async with async_session() as session:
 
-            event_one = await write_event(
+            e1 = await write_event(
                 session=session,
                 tenant_id=tenant_id,
                 request_id=None,
-                threat_category=
-                    "injection_attempt",
+                threat_category=(
+                    "injection_attempt"
+                ),
                 action_taken="blocked",
-                evaluator_reasoning=
-                    "Test event 1",
+                evaluator_reasoning=(
+                    "Test event 1"
+                ),
             )
 
-            event_two = await write_event(
+            e2 = await write_event(
                 session=session,
                 tenant_id=tenant_id,
                 request_id=None,
-                threat_category=
-                    "unauthorized_tool",
+                threat_category=(
+                    "unauthorized_tool"
+                ),
                 action_taken="blocked",
-                evaluator_reasoning=
-                    "Test event 2",
+                evaluator_reasoning=(
+                    "Test event 2"
+                ),
             )
 
         return {
-            "event1_hash":
-                event_one.record_hash,
-            "event2_hash":
-                event_two.record_hash,
-            "event2_prev_hash":
-                event_two.prev_hash,
-            "chain_valid":
-                (
-                    event_two.prev_hash
-                    == event_one.record_hash
-                ),
+            "event1_hash": e1.record_hash,
+            "event2_hash": e2.record_hash,
+            "event2_prev_hash": e2.prev_hash,
+            "chain_valid": (
+                e2.prev_hash
+                == e1.record_hash
+            ),
         }
 
 
@@ -1183,63 +1024,47 @@ if not _is_prod:
         )
 
         if tenant_id is None:
-
             return {
-                "error":
-                    "no_tenant_in_db"
+                "error": "no_tenant_in_db"
             }
 
         malicious = {
-            "name":
-                "db.query",
+            "name": "db.query",
             "args": {
-                "query":
-                    (
-                        "SELECT * FROM users; "
-                        "DROP TABLE users; --"
-                    )
+                "query": (
+                    "SELECT * FROM users; "
+                    "DROP TABLE users; --"
+                )
             },
         }
 
         benign = {
-            "name":
-                "db.query",
+            "name": "db.query",
             "args": {
-                "query":
-                    (
-                        "SELECT * FROM "
-                        "billing_invoices"
-                    ),
-                "table":
-                    "billing_invoices",
+                "query": (
+                    "SELECT * FROM billing_invoices"
+                ),
+                "table": "billing_invoices",
             },
         }
 
         return {
-            "malicious":
+            "malicious": (
                 await execute_tool_with_judge(
-                    raw_tool_call=
-                        malicious,
-                    policy=
-                        EXAMPLE_POLICY,
-                    policy_version=
-                        "1.0.0",
-                    tenant_id=
-                        tenant_id,
-                    trace_id=
-                        "test-cb-malicious",
-                ),
-            "benign":
+                    raw_tool_call=malicious,
+                    policy=EXAMPLE_POLICY,
+                    policy_version="1.0.0",
+                    tenant_id=tenant_id,
+                    trace_id="test-cb-malicious",
+                )
+            ),
+            "benign": (
                 await execute_tool_with_judge(
-                    raw_tool_call=
-                        benign,
-                    policy=
-                        EXAMPLE_POLICY,
-                    policy_version=
-                        "1.0.0",
-                    tenant_id=
-                        tenant_id,
-                    trace_id=
-                        "test-cb-benign",
-                ),
+                    raw_tool_call=benign,
+                    policy=EXAMPLE_POLICY,
+                    policy_version="1.0.0",
+                    tenant_id=tenant_id,
+                    trace_id="test-cb-benign",
+                )
+            ),
         }
