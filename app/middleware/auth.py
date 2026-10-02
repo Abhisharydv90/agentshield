@@ -7,15 +7,26 @@ Authentication order:
 2. Browser session cookie
 3. Development-only default tenant
 
-Production never falls back to a default tenant.
+Authentication produces a principal in ASGI state:
 
-Security properties:
+    request.state.tenant
+    request.state.user
+    request.state.api_key
+    request.state.auth_type
 
-- Invalid credentials fail closed.
-- Suspended tenants are rejected.
-- Session JWT must contain a valid tenant.
-- API keys are hashed before lookup.
-- Authentication does not trust client-provided tenant IDs.
+Important security separation:
+
+    Human session
+        -> User
+        -> Tenant
+        -> RBAC
+
+    API key
+        -> APIKey
+        -> Tenant
+        -> Agent authorization later
+
+API-key authenticated requests do NOT become human users.
 """
 
 from __future__ import annotations
@@ -28,17 +39,19 @@ from typing import Any
 from sqlalchemy import select
 
 from app.config import settings
-from app.db.models import APIKey, Tenant
+from app.db.models import APIKey, Tenant, User
 from app.db.session import async_session
 from app.security.api_keys import hash_key
 from app.security.sessions import decode_session_token
 
 
-log = logging.getLogger("agentshield.auth")
+log = logging.getLogger(
+    "agentshield.auth"
+)
 
 
 # ============================================================
-# Public/unauthenticated paths
+# Public paths
 # ============================================================
 
 _WHITELIST = {
@@ -52,7 +65,14 @@ _WHITELIST = {
 }
 
 
-def _is_whitelisted(path: str) -> bool:
+def _is_whitelisted(
+    path: str,
+) -> bool:
+    """
+    Determine whether an endpoint can be reached without
+    authentication.
+    """
+
     if path in _WHITELIST:
         return True
 
@@ -68,7 +88,8 @@ def _is_whitelisted(path: str) -> bool:
     if path.startswith("/_next"):
         return True
 
-    # Authentication endpoints are intentionally public.
+    # Authentication endpoints contain their own authentication
+    # state machine and therefore remain publicly reachable.
     if path.startswith("/api/auth/"):
         return True
 
@@ -76,13 +97,12 @@ def _is_whitelisted(path: str) -> bool:
 
 
 # ============================================================
-# Cookie parsing
+# Cookie parser
 # ============================================================
 
 def _parse_cookies(
     header: str,
 ) -> dict[str, str]:
-
     cookies: dict[str, str] = {}
 
     for part in header.split(";"):
@@ -107,10 +127,9 @@ def _parse_cookies(
 
 class AuthMiddleware:
     """
-    Pure ASGI middleware.
+    Pure ASGI authentication middleware.
 
-    Pure ASGI is intentional because AgentShield supports
-    streaming/SSE responses.
+    Pure ASGI is used so streaming/SSE responses remain safe.
     """
 
     def __init__(
@@ -144,9 +163,9 @@ class AuthMiddleware:
             "",
         )
 
-        # -----------------------------------------------------
+        # ----------------------------------------------------
         # CORS preflight
-        # -----------------------------------------------------
+        # ----------------------------------------------------
 
         if method == "OPTIONS":
             await self.app(
@@ -156,9 +175,9 @@ class AuthMiddleware:
             )
             return
 
-        # -----------------------------------------------------
-        # Public endpoints
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # Public paths
+        # ----------------------------------------------------
 
         if _is_whitelisted(path):
             await self.app(
@@ -168,15 +187,21 @@ class AuthMiddleware:
             )
             return
 
-        # -----------------------------------------------------
-        # Headers
-        # -----------------------------------------------------
+        # ----------------------------------------------------
+        # Request headers
+        # ----------------------------------------------------
 
         headers = {
-            key.decode("latin-1").lower():
-            value.decode("latin-1")
+            key.decode(
+                "latin-1"
+            ).lower(): value.decode(
+                "latin-1"
+            )
             for key, value
-            in scope.get("headers", [])
+            in scope.get(
+                "headers",
+                [],
+            )
         }
 
         raw_api_key = headers.get(
@@ -192,27 +217,33 @@ class AuthMiddleware:
         )
 
         tenant: Tenant | None = None
+        user: User | None = None
+        api_key: APIKey | None = None
+        auth_type: str | None = None
 
-        # =====================================================
-        # 1. API key authentication
-        # =====================================================
+        # ====================================================
+        # 1. API-key authentication
+        # ====================================================
 
         if raw_api_key:
 
-            tenant = await self._resolve_tenant_by_key(
+            resolved = await self._resolve_tenant_by_key(
                 raw_api_key
             )
 
-            if tenant is None:
+            if resolved is None:
                 await self._unauthorized(
                     send,
                     "invalid_credentials",
                 )
                 return
 
-        # =====================================================
-        # 2. Browser session authentication
-        # =====================================================
+            tenant, api_key = resolved
+            auth_type = "api_key"
+
+        # ====================================================
+        # 2. Browser-session authentication
+        # ====================================================
 
         if tenant is None:
 
@@ -223,24 +254,28 @@ class AuthMiddleware:
 
             if raw_session:
 
-                tenant = await self._resolve_tenant_by_session(
+                resolved = await self._resolve_user_by_session(
                     raw_session
                 )
 
-                if tenant is None:
+                if resolved is None:
                     await self._unauthorized(
                         send,
                         "invalid_credentials",
                     )
                     return
 
-        # =====================================================
-        # 3. Development fallback
-        # =====================================================
+                user, tenant = resolved
+                auth_type = "session"
+
+        # ====================================================
+        # 3. Development-only fallback
+        # ====================================================
 
         if tenant is None:
 
             if settings.ENV != "dev":
+
                 await self._unauthorized(
                     send,
                     "missing_credentials",
@@ -250,15 +285,18 @@ class AuthMiddleware:
             tenant = await self._resolve_default_tenant()
 
             if tenant is None:
+
                 await self._unauthorized(
                     send,
                     "authentication_required",
                 )
                 return
 
-        # =====================================================
-        # Attach authenticated tenant
-        # =====================================================
+            auth_type = "dev_fallback"
+
+        # ====================================================
+        # Attach principal state
+        # ====================================================
 
         state = scope.setdefault(
             "state",
@@ -266,6 +304,9 @@ class AuthMiddleware:
         )
 
         state["tenant"] = tenant
+        state["user"] = user
+        state["api_key"] = api_key
+        state["auth_type"] = auth_type
 
         await self.app(
             scope,
@@ -274,17 +315,19 @@ class AuthMiddleware:
         )
 
     # ========================================================
-    # API key resolver
+    # API-key resolver
     # ========================================================
 
     async def _resolve_tenant_by_key(
         self,
         raw_key: str,
-    ) -> Tenant | None:
+    ) -> tuple[Tenant, APIKey] | None:
 
         from datetime import datetime, timezone
 
-        key_hash = hash_key(raw_key)
+        key_hash = hash_key(
+            raw_key
+        )
 
         try:
 
@@ -314,7 +357,9 @@ class AuthMiddleware:
                 )
 
                 row = (
-                    await session.execute(stmt)
+                    await session.execute(
+                        stmt
+                    )
                 ).first()
 
                 if row is None:
@@ -323,29 +368,35 @@ class AuthMiddleware:
                 api_key, tenant = row
 
                 api_key.last_used_at = (
-                    datetime.now(timezone.utc)
+                    datetime.now(
+                        timezone.utc
+                    )
                 )
 
                 await session.commit()
 
-                return tenant
+                return (
+                    tenant,
+                    api_key,
+                )
 
         except Exception:
             log.exception(
                 "API key authentication lookup failed"
             )
 
-            # Fail closed.
+            # Never convert an authentication database failure
+            # into successful authentication.
             return None
 
     # ========================================================
-    # Session resolver
+    # Browser-session resolver
     # ========================================================
 
-    async def _resolve_tenant_by_session(
+    async def _resolve_user_by_session(
         self,
         raw_session: str,
-    ) -> Tenant | None:
+    ) -> tuple[User, Tenant] | None:
 
         try:
 
@@ -356,29 +407,88 @@ class AuthMiddleware:
             if payload is None:
                 return None
 
-            tenant_id_raw = payload.get(
-                "tenant_id"
-            )
-
-            if not tenant_id_raw:
-                return None
+            # ------------------------------------------------
+            # UUID validation
+            # ------------------------------------------------
 
             try:
-                tenant_id = uuid.UUID(
-                    str(tenant_id_raw)
+
+                user_id = uuid.UUID(
+                    str(payload["sub"])
                 )
-            except ValueError:
+
+                tenant_id = uuid.UUID(
+                    str(payload["tenant_id"])
+                )
+
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+            ):
                 return None
+
+            # ------------------------------------------------
+            # Session-version validation
+            # ------------------------------------------------
+
+            session_version = payload.get(
+                "session_version"
+            )
+
+            if not isinstance(
+                session_version,
+                int,
+            ):
+                return None
+
+            # ------------------------------------------------
+            # Database validation
+            # ------------------------------------------------
 
             async with async_session() as session:
 
-                stmt = select(Tenant).where(
+                user_stmt = select(
+                    User
+                ).where(
+                    User.user_id
+                    == user_id
+                )
+
+                user = (
+                    await session.execute(
+                        user_stmt
+                    )
+                ).scalar_one_or_none()
+
+                if user is None:
+                    return None
+
+                if user.status != "active":
+                    return None
+
+                if user.tenant_id != tenant_id:
+                    return None
+
+                # Old sessions are revoked when the database
+                # session version changes.
+                if (
+                    user.session_version
+                    != session_version
+                ):
+                    return None
+
+                tenant_stmt = select(
+                    Tenant
+                ).where(
                     Tenant.tenant_id
                     == tenant_id
                 )
 
                 tenant = (
-                    await session.execute(stmt)
+                    await session.execute(
+                        tenant_stmt
+                    )
                 ).scalar_one_or_none()
 
                 if tenant is None:
@@ -387,7 +497,10 @@ class AuthMiddleware:
                 if tenant.status != "active":
                     return None
 
-                return tenant
+                return (
+                    user,
+                    tenant,
+                )
 
         except Exception:
             log.exception(
@@ -409,11 +522,14 @@ class AuthMiddleware:
             async with async_session() as session:
 
                 stmt = select(Tenant).where(
-                    Tenant.slug == settings.DEFAULT_TENANT
+                    Tenant.slug
+                    == settings.DEFAULT_TENANT
                 )
 
                 return (
-                    await session.execute(stmt)
+                    await session.execute(
+                        stmt
+                    )
                 ).scalar_one_or_none()
 
         except Exception:
@@ -424,7 +540,7 @@ class AuthMiddleware:
             return None
 
     # ========================================================
-    # Response helpers
+    # 401 response
     # ========================================================
 
     async def _unauthorized(
@@ -442,7 +558,8 @@ class AuthMiddleware:
 
         await send(
             {
-                "type": "http.response.start",
+                "type":
+                    "http.response.start",
                 "status": 401,
                 "headers": [
                     (
@@ -455,7 +572,9 @@ class AuthMiddleware:
                     ),
                     (
                         b"content-length",
-                        str(len(body)).encode(),
+                        str(
+                            len(body)
+                        ).encode(),
                     ),
                 ],
             }
@@ -463,7 +582,8 @@ class AuthMiddleware:
 
         await send(
             {
-                "type": "http.response.body",
+                "type":
+                    "http.response.body",
                 "body": body,
             }
         )
