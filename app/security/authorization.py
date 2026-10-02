@@ -136,6 +136,22 @@ PERMISSIONS: dict[str, set[Role]] = {
         Role.OWNER,
         Role.ADMIN,
     },
+
+    # --------------------------------------------------------
+    # Human approval control plane
+    # --------------------------------------------------------
+    # Approval is a high-impact security operation. Members may not
+    # approve or deny runtime actions in the initial control plane.
+
+    "tenant.approvals.read": {
+        Role.OWNER,
+        Role.ADMIN,
+    },
+
+    "tenant.approvals.decide": {
+        Role.OWNER,
+        Role.ADMIN,
+    },
 }
 
 
@@ -144,7 +160,9 @@ PERMISSIONS: dict[str, set[Role]] = {
 # ============================================================
 
 
-def normalize_role(role: str) -> Role:
+def normalize_role(
+    role: str,
+) -> Role:
     """
     Convert an arbitrary database role value into the controlled
     Role enum.
