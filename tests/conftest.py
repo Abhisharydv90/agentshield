@@ -1,31 +1,55 @@
 """
 Pytest configuration.
 
-Must set AGENTSHIELD_TESTING=1 BEFORE app.db.session is imported.
-Disposes the engine after every test to release connections.
+AgentShield has shared asynchronous infrastructure such as database and
+Redis clients. The complete async test suite therefore runs on one
+session-scoped event loop.
+
+We intentionally do NOT redefine pytest-asyncio's event_loop fixture,
+because newer pytest-asyncio versions deprecate that pattern.
 """
 
-import asyncio
+from __future__ import annotations
+
 import os
 
-# Signal test mode to the app (enables NullPool in app.db.session)
+# Must happen before application/database modules are imported.
 os.environ["AGENTSHIELD_TESTING"] = "1"
 
 import pytest
+import pytest_asyncio
 
 
-@pytest.fixture(autouse=True)
+def pytest_collection_modifyitems(items) -> None:
+    """
+    Run every asyncio test on the same session-scoped event loop.
+
+    pytest-asyncio 0.24 supports loop_scope on the asyncio marker. This gives
+    us the same practical behavior as the old custom session event_loop
+    fixture without redefining pytest-asyncio internals.
+    """
+    session_scope_marker = pytest.mark.asyncio(
+        loop_scope="session"
+    )
+
+    for item in items:
+        if pytest_asyncio.is_async_test(item):
+            item.add_marker(
+                session_scope_marker,
+                append=False,
+            )
+
+
+@pytest_asyncio.fixture
 async def _dispose_engine_after_test():
-    """Release all DB connections after each test."""
+    """
+    Release database connections after each test.
+
+    The event loop itself remains session-scoped, while the SQLAlchemy engine
+    is disposed between tests so connections do not leak between cases.
+    """
     yield
+
     from app.db.session import engine
+
     await engine.dispose()
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Session-scoped event loop so tests share one loop where possible."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()

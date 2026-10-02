@@ -1,13 +1,22 @@
 """
-PII Vault — reversible token storage.
+Secure PII vault.
 
-Redis for hot-path lookups (TTL-scoped). Falls back to an in-memory dict
-if Redis is unavailable so the proxy never returns a 500 on dependency failure.
+Redis is the authoritative storage backend.
+
+Security rule:
+
+    Redis unavailable
+        ->
+    PII operation fails closed
+
+There is intentionally NO raw-PII in-memory fallback.
+
+The vault is TTL-scoped and keyed by tenant + trace.
 """
 
 from __future__ import annotations
 
-import time
+import hashlib
 from typing import Any
 
 import redis.asyncio as redis
@@ -15,141 +24,262 @@ import redis.asyncio as redis
 from app.config import settings
 
 
-# ============================================================
-# Redis client — lazy init, safe to import even if Redis is down
-# ============================================================
+class PIIVaultUnavailableError(RuntimeError):
+    """
+    Raised when the authoritative PII vault cannot safely be used.
+
+    Callers should treat this as a fail-closed condition: the protected
+    request must not continue to an upstream LLM or tool.
+    """
+
 
 _redis: redis.Redis | None = None
-_redis_failed: bool = False
-
-# In-memory fallback: {key: (mapping, expires_at)}
-_inmem: dict[str, tuple[dict[str, str], float]] = {}
+_redis_failed = False
 
 
 def _get_redis() -> redis.Redis | None:
     """
-    Return a Redis client, or None if initialization failed.
+    Lazily create the Redis client.
 
-    Lazily initialized so importing this module never crashes the app
-    on startup when Redis is temporarily unavailable.
+    Client construction itself does not prove that Redis is reachable;
+    callers performing security-sensitive operations must use
+    _require_redis().
     """
-    global _redis, _redis_failed
+    global _redis
+    global _redis_failed
+
     if _redis_failed:
         return None
+
     if _redis is None:
         try:
-            _redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
-        except Exception as e:
-            print(f"WARN: Redis client init failed: {e}")
+            _redis = redis.from_url(
+                settings.REDIS_URL,
+                decode_responses=True,
+            )
+        except Exception:
             _redis_failed = True
             return None
+
     return _redis
 
 
-# ============================================================
-# Vault
-# ============================================================
+async def _require_redis() -> redis.Redis:
+    """
+    Return a healthy Redis client or fail closed.
+    """
+    client = _get_redis()
+
+    if client is None:
+        raise PIIVaultUnavailableError(
+            "PII vault unavailable: Redis client could not be initialized."
+        )
+
+    try:
+        await client.ping()
+    except Exception as exc:
+        raise PIIVaultUnavailableError(
+            "PII vault unavailable: Redis health check failed."
+        ) from exc
+
+    return client
+
 
 class PIIVault:
-    """Stores placeholder → original-value mappings, scoped by (tenant, trace_id)."""
+    """
+    Authoritative Redis-backed PII storage.
 
-    def __init__(self, ttl: int = 900) -> None:
+    No raw PII is retained in application memory as a fallback.
+    """
+
+    def __init__(
+        self,
+        ttl: int = 900,
+    ) -> None:
         self.ttl = ttl
 
-    def _key(self, tenant: str, trace_id: str) -> str:
-        return f"vault:{tenant}:{trace_id}"
+    def _key(
+        self,
+        tenant: str,
+        trace_id: str,
+    ) -> str:
+        """
+        Build a tenant-scoped Redis key without putting the raw tenant
+        identifier into Redis key names.
+        """
+        tenant_hash = hashlib.sha256(
+            tenant.encode("utf-8")
+        ).hexdigest()[:24]
 
-    # --- Write ---
+        return (
+            "agentshield:pii:"
+            f"{tenant_hash}:"
+            f"{trace_id}"
+        )
 
-    async def store(self, trace_id: str, tenant: str, mapping: dict[str, str]) -> None:
-        """Persist the placeholder→original mapping with a TTL."""
+    async def store(
+        self,
+        trace_id: str,
+        tenant: str,
+        mapping: dict[str, str],
+    ) -> None:
+        """
+        Persist placeholder -> original mappings with TTL.
+
+        Failure is propagated as PIIVaultUnavailableError so the caller
+        can stop processing the protected request.
+        """
         if not mapping:
             return
 
-        key = self._key(tenant, trace_id)
-        r = _get_redis()
+        client = await _require_redis()
 
-        if r is not None:
-            try:
-                pipe = r.pipeline()
-                for placeholder, original in mapping.items():
-                    pipe.hset(key, placeholder, original)
-                pipe.expire(key, self.ttl)
-                await pipe.execute()
-                return
-            except Exception as e:
-                print(f"WARN: Redis store failed, falling back to memory: {e}")
+        key = self._key(
+            tenant,
+            trace_id,
+        )
 
-        # In-memory fallback
-        existing, _ = _inmem.get(key, ({}, 0.0))
-        existing.update(mapping)
-        _inmem[key] = (existing, time.time() + self.ttl)
+        try:
+            pipe = client.pipeline()
 
-    # --- Read ---
+            for (
+                placeholder,
+                original,
+            ) in mapping.items():
+                pipe.hset(
+                    key,
+                    placeholder,
+                    original,
+                )
 
-    async def get_mapping(self, trace_id: str, tenant: str) -> dict[str, str]:
-        """Return the full placeholder→original mapping."""
-        key = self._key(tenant, trace_id)
-        r = _get_redis()
+            pipe.expire(
+                key,
+                self.ttl,
+            )
 
-        if r is not None:
-            try:
-                result = await r.hgetall(key)
-                if result:
-                    return dict(result)
-            except Exception as e:
-                print(f"WARN: Redis read failed, checking memory: {e}")
+            await pipe.execute()
 
-        entry = _inmem.get(key)
-        if entry and entry[1] > time.time():
-            return entry[0]
-        return {}
+        except PIIVaultUnavailableError:
+            raise
 
-    async def rehydrate(self, text: str, trace_id: str, tenant: str) -> str:
-        """Replace every placeholder in the text with its original value."""
-        mapping = await self.get_mapping(trace_id, tenant)
+        except Exception as exc:
+            raise PIIVaultUnavailableError(
+                "PII vault write failed."
+            ) from exc
+
+    async def get_mapping(
+        self,
+        trace_id: str,
+        tenant: str,
+    ) -> dict[str, str]:
+        """
+        Retrieve the placeholder mapping for a trace.
+        """
+        client = await _require_redis()
+
+        key = self._key(
+            tenant,
+            trace_id,
+        )
+
+        try:
+            result = await client.hgetall(
+                key
+            )
+        except Exception as exc:
+            raise PIIVaultUnavailableError(
+                "PII vault read failed."
+            ) from exc
+
+        return dict(result)
+
+    async def rehydrate(
+        self,
+        text: str,
+        trace_id: str,
+        tenant: str,
+    ) -> str:
+        """
+        Replace placeholders with their original values.
+
+        This operation is intentionally dependent on Redis being available.
+        """
+        mapping = await self.get_mapping(
+            trace_id,
+            tenant,
+        )
+
         if not mapping:
             return text
-        for placeholder, original in mapping.items():
-            text = text.replace(placeholder, original)
+
+        for (
+            placeholder,
+            original,
+        ) in mapping.items():
+            text = text.replace(
+                placeholder,
+                original,
+            )
+
         return text
 
-    # --- Cleanup ---
+    async def clear(
+        self,
+        trace_id: str,
+        tenant: str,
+    ) -> None:
+        """
+        Remove the stored mapping.
+        """
+        client = await _require_redis()
 
-    async def clear(self, trace_id: str, tenant: str) -> None:
-        """Remove a vault entry — called after successful rehydration."""
-        key = self._key(tenant, trace_id)
-        r = _get_redis()
+        key = self._key(
+            tenant,
+            trace_id,
+        )
 
-        if r is not None:
-            try:
-                await r.delete(key)
-            except Exception:
-                pass
-
-        _inmem.pop(key, None)
-
-    # --- Diagnostics ---
-
-    async def health(self) -> dict[str, Any]:
-        """Report whether Redis is reachable. Used by /ready."""
-        r = _get_redis()
-        if r is None:
-            return {"backend": "memory", "redis_ok": False, "entries_memory": len(_inmem)}
         try:
-            await r.ping()
-            return {"backend": "redis", "redis_ok": True, "entries_memory": len(_inmem)}
-        except Exception as e:
+            await client.delete(
+                key
+            )
+        except Exception as exc:
+            raise PIIVaultUnavailableError(
+                "PII vault cleanup failed."
+            ) from exc
+
+    async def health(
+        self,
+    ) -> dict[str, Any]:
+        """
+        Report Redis health without raising.
+
+        This is intended for health/readiness endpoints, not for security
+        decisions during request processing.
+        """
+        client = _get_redis()
+
+        if client is None:
             return {
-                "backend": "memory",
+                "backend": "redis",
                 "redis_ok": False,
-                "error": str(e),
-                "entries_memory": len(_inmem),
+            }
+
+        try:
+            await client.ping()
+
+            return {
+                "backend": "redis",
+                "redis_ok": True,
+            }
+
+        except Exception as exc:
+            return {
+                "backend": "redis",
+                "redis_ok": False,
+                "error": str(exc),
             }
 
 
-# ============================================================
-# Singleton
-# ============================================================
-
-vault = PIIVault(ttl=settings.PII_VAULT_TTL)
+vault = PIIVault(
+    ttl=settings.PII_VAULT_TTL
+)

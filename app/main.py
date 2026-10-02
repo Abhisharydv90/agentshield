@@ -4,7 +4,7 @@ AgentShield — application entrypoint.
 Wires together:
   - FastAPI app with lifespan management
   - Middleware stack: trace, rate limit, trusted hosts, CORS, CSRF, auth
-  - Routers: telemetry, proxy, auth, tenant, meta
+  - Routers: telemetry, proxy, auth, tenant, approvals, meta
   - Global exception handlers with structured JSON responses
   - Dev-only routes (gated behind settings.ENV != "prod")
 """
@@ -23,10 +23,14 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from starlette.types import Receive, Scope, Send
+
 from app.config import settings
+from app.middleware.trace import get_trace_id
 from app.middleware.auth import AuthMiddleware
 from app.middleware.csrf import CSRFMiddleware
 from app.middleware.ratelimit import RateLimitMiddleware
+from app.security.pii.vault import PIIVaultUnavailableError
 
 
 # ============================================================
@@ -80,6 +84,70 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("AgentShield shutting down")
 
 
+
+
+class RequestBodyTooLargeError(Exception):
+    pass
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized HTTP bodies before application parsing/PII processing."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.limit = settings.MAX_REQUEST_BODY_BYTES
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        content_length = headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.limit:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={
+                            "error": "request_body_too_large",
+                            "status": 413,
+                        },
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"error": "invalid_content_length", "status": 400},
+                )
+                await response(scope, receive, send)
+                return
+
+        received = 0
+        done = False
+
+        async def limited_receive() -> dict:
+            nonlocal received, done
+            message = await receive()
+            if message["type"] != "http.request":
+                return message
+
+            body = message.get("body", b"")
+            received += len(body)
+            if received > self.limit:
+                raise RequestBodyTooLargeError
+
+            if not message.get("more_body", False):
+                done = True
+            return message
+
+        await self.app(scope, limited_receive, send)
+
 # ============================================================
 # App
 # ============================================================
@@ -120,7 +188,7 @@ class TraceMiddleware:
             k.decode().lower(): v.decode()
             for k, v in scope.get("headers", [])
         }
-        trace_id = headers.get("x-trace-id") or str(uuid.uuid4())
+        trace_id = get_trace_id(Request(scope))
 
         state = scope.setdefault("state", {})
         state["trace_id"] = trace_id
@@ -174,18 +242,21 @@ class TraceMiddleware:
 # Auth innermost so it wraps only the routes that actually need identity.
 # ============================================================
 
-_allowed_hosts = ["*"] if not _is_prod else [
-    "agentshield.app",
-    "*.agentshield.app",
-    "*.up.railway.app",
-    "*.vercel.app",
-]
+_allowed_hosts = (
+    ["*"]
+    if not _is_prod
+    else settings.trusted_hosts
+)
 
-_prod_origins = [
-    "https://agentshield.app",
-    "https://www.agentshield.app",
-    "https://agentshield-woad.vercel.app",
-]
+_prod_origins = (
+    settings.cors_origins
+    if _is_prod
+    else [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+    ]
+)
 _dev_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -195,6 +266,7 @@ _allow_origins = _prod_origins if _is_prod else _dev_origins
 _allow_origin_regex = r"https://.*\.vercel\.app" if _is_prod else None
 
 # --- Add INNERMOST first ---
+app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(
@@ -218,22 +290,71 @@ app.add_middleware(TraceMiddleware)
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(
-    request: Request, exc: StarletteHTTPException
+    request: Request,
+    exc: StarletteHTTPException,
 ) -> JSONResponse:
     trace_id = getattr(request.state, "trace_id", None)
     detail = exc.detail
+
     if isinstance(detail, str):
-        body = {"error": detail, "status": exc.status_code}
+        body = {
+            "error": detail,
+            "status": exc.status_code,
+        }
+    elif isinstance(detail, dict):
+        # Preserve structured application errors such as:
+        # {"error": "capability_required", "capability": "..."}.
+        # Wrapping these as {"error": "http_error", ...} would break the
+        # API contract and hide the actual security decision.
+        body = dict(detail)
+        body.setdefault("status", exc.status_code)
     else:
-        body = {"error": "http_error", "status": exc.status_code, "detail": detail}
+        body = {
+            "error": "http_error",
+            "status": exc.status_code,
+            "detail": detail,
+        }
+
     if trace_id:
         body["trace_id"] = trace_id
-    return JSONResponse(status_code=exc.status_code, content=body)
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=body,
+    )
+
+
+@app.exception_handler(PIIVaultUnavailableError)
+async def pii_vault_unavailable_handler(
+    request: Request,
+    exc: PIIVaultUnavailableError,
+) -> JSONResponse:
+    """PII protection is a hard security dependency; never fail open."""
+
+    trace_id = getattr(request.state, "trace_id", None)
+    log.error(
+        "PII vault unavailable · trace=%s · %s",
+        trace_id,
+        exc,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "pii_vault_unavailable",
+            "status": 503,
+            "trace_id": trace_id,
+            "message": (
+                "Request not forwarded because PII protection is unavailable."
+            ),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(
-    request: Request, exc: Exception
+    request: Request,
+    exc: Exception,
 ) -> JSONResponse:
     trace_id = getattr(request.state, "trace_id", None)
     log.exception(
@@ -260,11 +381,13 @@ from app.api.telemetry import router as telemetry_router
 from app.proxy.router import router as proxy_router
 from app.api.auth import router as auth_router
 from app.api.tenant import router as tenant_router
+from app.api.approvals import router as approvals_router
 
 app.include_router(telemetry_router)
 app.include_router(proxy_router)
 app.include_router(auth_router)
 app.include_router(tenant_router)
+app.include_router(approvals_router)
 
 
 # ============================================================
@@ -332,7 +455,7 @@ async def readiness() -> JSONResponse:
 # ============================================================
 
 if not _is_prod:
-    from sqlalchemy import select, desc
+    from sqlalchemy import select
     from app.security.judge.evaluate import execute_tool_with_judge
     from app.security.judge.normalize import normalize_tool_call
     from app.security.judge.contract import NormalizedToolCall
@@ -400,7 +523,7 @@ if not _is_prod:
     async def test_stream_buffer() -> dict:
         gate = StreamingToolCallGate()
         chunks = [
-            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "db.query", "arguments": "{\"query\": \"SELECT * "}}]}, "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "db.query", "arguments": '{"query": "SELECT * '}}]}, "finish_reason": None}]},
             {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "FROM users; DROP "}}]}, "finish_reason": None}]},
             {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "TABLE users; --\"}"}}]}, "finish_reason": "tool_calls"}]},
         ]

@@ -1,46 +1,113 @@
 """
 Async SQLAlchemy session factory.
 
-Uses NullPool during tests to prevent "Event loop is closed" errors —
-pytest creates a new event loop per test, and pooled connections are
-tied to whichever loop opened them.
+Database TLS is environment-aware:
+
+Development:
+    PostgreSQL may run without TLS.
+
+Staging/Production:
+    TLS is required.
+
+Tests:
+    NullPool is used to avoid event-loop/pool reuse problems.
 """
 
-import os
+from __future__ import annotations
 
-from sqlalchemy.pool import NullPool
+import os
+from typing import AsyncGenerator
+
 from sqlalchemy.ext.asyncio import (
-    create_async_engine,
-    async_sessionmaker,
     AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 
 
 _is_test = os.getenv("AGENTSHIELD_TESTING") == "1"
 
+
+# ---------------------------------------------------------
+# Engine configuration
+# ---------------------------------------------------------
+
 _engine_kwargs: dict = {
     "echo": False,
     "future": True,
-    "connect_args": {
-        "ssl": "require",
-        "statement_cache_size": 0,  # required for Neon's pgbouncer
-    },
 }
+
+
+# ---------------------------------------------------------
+# PostgreSQL connection configuration
+# ---------------------------------------------------------
+
+if settings.DATABASE_URL.startswith(
+    "postgresql+asyncpg://"
+):
+    connect_args: dict = {
+        # Required when using PgBouncer/transaction pooling.
+        "statement_cache_size": 0,
+    }
+
+    if settings.DATABASE_REQUIRE_SSL:
+        connect_args["ssl"] = "require"
+
+    _engine_kwargs["connect_args"] = connect_args
+
+
+# ---------------------------------------------------------
+# Test vs production pooling
+# ---------------------------------------------------------
 
 if _is_test:
     _engine_kwargs["poolclass"] = NullPool
 else:
     _engine_kwargs["pool_pre_ping"] = True
 
-engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 
-async_session = async_sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
+# ---------------------------------------------------------
+# Engine
+# ---------------------------------------------------------
+
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    **_engine_kwargs,
 )
 
 
-async def get_db():
+# ---------------------------------------------------------
+# Session factory
+# ---------------------------------------------------------
+
+async_session = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+# ---------------------------------------------------------
+# FastAPI dependency
+# ---------------------------------------------------------
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session() as session:
         yield session
+
+
+# ---------------------------------------------------------
+# Shutdown helper
+# ---------------------------------------------------------
+
+async def dispose_engine() -> None:
+    """
+    Dispose all database connections.
+
+    Called during application shutdown.
+    """
+
+    await engine.dispose()
