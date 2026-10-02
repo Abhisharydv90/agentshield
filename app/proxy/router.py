@@ -294,8 +294,8 @@ async def chat_completions(
                     ),
                 )
 
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError("security_audit_unavailable") from exc
 
         raise HTTPException(
             status_code=403,
@@ -347,8 +347,8 @@ async def chat_completions(
                         ),
                     )
 
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError("security_audit_unavailable") from exc
 
     # ========================================================
     # Layer 3 — policy
