@@ -230,6 +230,13 @@ async def http_exception_handler(
             "error": detail,
             "status": exc.status_code,
         }
+    elif isinstance(detail, dict):
+        # Preserve structured application errors such as:
+        # {"error": "capability_required", "capability": "..."}.
+        # Wrapping these as {"error": "http_error", ...} would break the
+        # API contract and hide the actual security decision.
+        body = dict(detail)
+        body.setdefault("status", exc.status_code)
     else:
         body = {
             "error": "http_error",
@@ -265,6 +272,9 @@ async def pii_vault_unavailable_handler(
             "error": "pii_vault_unavailable",
             "status": 503,
             "trace_id": trace_id,
+            "message": (
+                "Request not forwarded because PII protection is unavailable."
+            ),
         },
         headers={"Cache-Control": "no-store"},
     )
