@@ -365,13 +365,20 @@ async def _issue_token(
 
 
 async def _consume_token(session, raw: str, kind: str) -> AuthToken | None:
-    """Find, validate, and mark-used a token. None if invalid/expired/used."""
+    """Atomically claim a one-time token within the caller's transaction.
+
+    The row lock serializes concurrent consumers. The first transaction marks
+    the token used; a concurrent consumer waits for that transaction, then
+    observes used_at and fails closed.
+    """
     tok = (
         await session.execute(
-            select(AuthToken).where(
+            select(AuthToken)
+            .where(
                 AuthToken.token_hash == _hash_token(raw),
                 AuthToken.kind == kind,
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
 
