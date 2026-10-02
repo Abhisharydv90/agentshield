@@ -23,6 +23,8 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from starlette.types import Receive, Scope, Send
+
 from app.config import settings
 from app.middleware.trace import get_trace_id
 from app.middleware.auth import AuthMiddleware
@@ -81,6 +83,69 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     log.info("AgentShield shutting down")
 
+
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized HTTP bodies before application parsing/PII processing."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.limit = settings.MAX_REQUEST_BODY_BYTES
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        content_length = headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.limit:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={
+                            "error": "request_body_too_large",
+                            "status": 413,
+                        },
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"error": "invalid_content_length", "status": 400},
+                )
+                await response(scope, receive, send)
+                return
+
+        received = 0
+        done = False
+
+        async def limited_receive() -> dict:
+            nonlocal received, done
+            message = await receive()
+            if message["type"] != "http.request":
+                return message
+
+            body = message.get("body", b"")
+            received += len(body)
+            if received > self.limit:
+                done = True
+                return {
+                    "type": "http.disconnect",
+                }
+
+            if not message.get("more_body", False):
+                done = True
+            return message
+
+        await self.app(scope, limited_receive, send)
 
 # ============================================================
 # App
@@ -197,6 +262,7 @@ _allow_origins = _prod_origins if _is_prod else _dev_origins
 _allow_origin_regex = r"https://.*\.vercel\.app" if _is_prod else None
 
 # --- Add INNERMOST first ---
+app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(
