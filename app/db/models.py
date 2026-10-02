@@ -18,7 +18,10 @@ from sqlalchemy import (
     DateTime,
     Text,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
+    UniqueConstraint,
+    CheckConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -621,6 +624,173 @@ class RequestLog(Base):
         default="allowed",
     )
 
+class EvidenceNode(Base):
+    """
+    Cryptographically identifiable security evidence artifact.
+
+    The payload itself is represented by artifact_hash. The optional
+    metadata_redacted field is intended only for already-redacted,
+    non-secret metadata.
+    """
+
+    __tablename__ = "evidence_nodes"
+
+    evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    trace_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        index=True,
+    )
+
+    node_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    schema_version: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="1",
+    )
+
+    artifact_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    source: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    metadata_redacted: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    security_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "security_events.event_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "evidence_id",
+            name="uq_evidence_nodes_tenant_evidence",
+        ),
+    )
+
+class EvidenceEdge(Base):
+    """
+    Directed causal relationship between two evidence nodes.
+
+    Composite tenant-scoped foreign keys ensure that an edge cannot
+    connect evidence belonging to different tenants.
+    """
+
+    __tablename__ = "evidence_edges"
+
+    edge_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    trace_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        index=True,
+    )
+
+    from_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+
+    to_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+
+    relation: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "from_evidence_id",
+            ],
+            [
+                "evidence_nodes.tenant_id",
+                "evidence_nodes.evidence_id",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "to_evidence_id",
+            ],
+            [
+                "evidence_nodes.tenant_id",
+                "evidence_nodes.evidence_id",
+            ],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "from_evidence_id",
+            "to_evidence_id",
+            "relation",
+            name="uq_evidence_edge_relationship",
+        ),
+        CheckConstraint(
+            "from_evidence_id <> to_evidence_id",
+            name="ck_evidence_edge_not_self",
+        ),
+    )
 
 class SecurityEvent(Base):
     """
@@ -731,4 +901,42 @@ Index(
     "ix_approval_requests_agent_time",
     ApprovalRequest.agent_id,
     ApprovalRequest.requested_at.desc(),
+)
+
+Index(
+    "ix_evidence_nodes_tenant_trace",
+    EvidenceNode.tenant_id,
+    EvidenceNode.trace_id,
+)
+
+Index(
+    "ix_evidence_nodes_tenant_type_time",
+    EvidenceNode.tenant_id,
+    EvidenceNode.node_type,
+    EvidenceNode.created_at.desc(),
+)
+
+Index(
+    "ix_evidence_edges_tenant_trace",
+    EvidenceEdge.tenant_id,
+    EvidenceEdge.trace_id,
+)
+
+Index(
+    "ix_evidence_edges_from",
+    EvidenceEdge.tenant_id,
+    EvidenceEdge.from_evidence_id,
+)
+
+Index(
+    "ix_evidence_edges_to",
+    EvidenceEdge.tenant_id,
+    EvidenceEdge.to_evidence_id,
+)
+
+Index(
+    "uq_agents_api_key_id",
+    Agent.api_key_id,
+    unique=True,
+    postgresql_where=Agent.api_key_id.is_not(None),
 )
