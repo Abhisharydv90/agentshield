@@ -11,6 +11,7 @@ Security notes:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import time
 from typing import Any
@@ -51,23 +52,37 @@ def _client_ip(
     reverse proxy after it has sanitized the connection metadata.
     """
 
-    trusted_proxy_ip = headers.get(
+    client = scope.get("client")
+    peer_host = str(client[0]).strip() if client else ""
+
+    # The forwarded client-IP header is trusted only when the immediate peer
+    # belongs to an explicitly configured proxy network.
+    forwarded = headers.get(
         "x-agentshield-client-ip",
         "",
     ).strip()
 
-    if trusted_proxy_ip:
-        return trusted_proxy_ip
+    if forwarded and peer_host:
+        try:
+            peer = ipaddress.ip_address(peer_host)
+            forwarded_ip = ipaddress.ip_address(forwarded)
+            trusted = any(
+                peer in ipaddress.ip_network(
+                    network,
+                    strict=False,
+                )
+                for network in settings.trusted_proxy_ips
+            )
+            if trusted:
+                return str(forwarded_ip)
+        except ValueError:
+            pass
 
-    client = scope.get(
-        "client"
-    )
-
-    if client:
-        host = str(client[0]).strip()
-
-        if host:
-            return host
+    if peer_host:
+        try:
+            return str(ipaddress.ip_address(peer_host))
+        except ValueError:
+            return peer_host
 
     return "unknown"
 
