@@ -53,6 +53,38 @@ def evaluate_policy(
                     rule_matched=rule.tool_pattern,
                 )
 
+        # Enforce a configured row ceiling against the canonical argument
+        # names used by database tools. If a bounded rule is configured but
+        # the tool does not provide a numeric limit, fail closed.
+        if rule.max_rows is not None:
+            row_limit = None
+            for key in ("max_rows", "limit", "row_limit"):
+                candidate = tool_call.args_normalized.get(key)
+                if candidate is not None:
+                    try:
+                        row_limit = int(candidate)
+                    except (TypeError, ValueError):
+                        return PolicyVerdict(
+                            decision="deny",
+                            reason=f"invalid_row_limit:{key}",
+                            rule_matched=rule.tool_pattern,
+                        )
+                    break
+
+            if row_limit is None:
+                return PolicyVerdict(
+                    decision="deny",
+                    reason="row_limit_required",
+                    rule_matched=rule.tool_pattern,
+                )
+
+            if row_limit > rule.max_rows:
+                return PolicyVerdict(
+                    decision="deny",
+                    reason=f"max_rows_exceeded:{rule.max_rows}",
+                    rule_matched=rule.tool_pattern,
+                )
+
         # An explicit human-approval flag upgrades an allowable action.
         if rule.require_human_approval:
             if rule.decision == "deny":
