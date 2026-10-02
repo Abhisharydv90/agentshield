@@ -5,14 +5,15 @@ Human access:
     Browser session -> User -> RBAC -> tenant management.
 
 API-key access:
-    API keys are intentionally NOT accepted as human-management
-    authorization for these endpoints.
+    API keys are runtime credentials and cannot administer
+    the tenant management plane.
 
-Tenant isolation is enforced on every database operation by
-tenant_id.
+Agent management:
+    An Agent may optionally be bound to exactly one API key.
 
-Management permissions are defined in:
-    app.security.authorization
+Capabilities are validated against the controlled vocabulary in:
+
+    app.security.capabilities
 """
 
 from __future__ import annotations
@@ -20,10 +21,10 @@ from __future__ import annotations
 import secrets as _secrets
 import uuid as _uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from app.db.models import (
@@ -45,6 +46,10 @@ from app.security.api_keys import (
 from app.security.authorization import (
     require_permission,
 )
+from app.security.capabilities import (
+    Capability,
+    normalize_capabilities,
+)
 
 
 router = APIRouter(
@@ -53,17 +58,21 @@ router = APIRouter(
 )
 
 
+AgentStatus = Literal[
+    "active",
+    "suspended",
+    "revoked",
+]
+
+
 # ============================================================
-# Authentication / authorization helpers
+# Authorization helpers
 # ============================================================
 
 
 def _require_tenant(
     request: Request,
 ) -> Tenant:
-    """
-    Retrieve the tenant attached by AuthMiddleware.
-    """
 
     tenant = getattr(
         request.state,
@@ -83,11 +92,6 @@ def _require_tenant(
 def _require_user(
     request: Request,
 ) -> User:
-    """
-    Tenant administration requires a human browser session.
-
-    API-key authenticated requests are intentionally rejected.
-    """
 
     user = getattr(
         request.state,
@@ -126,10 +130,6 @@ def _authorize(
     request: Request,
     permission: str,
 ) -> tuple[Tenant, User]:
-    """
-    Resolve the authenticated tenant/user and enforce one
-    management permission.
-    """
 
     tenant = _require_tenant(
         request
@@ -151,7 +151,7 @@ def _authorize(
 
 
 # ============================================================
-# Settings helper
+# Settings
 # ============================================================
 
 
@@ -159,11 +159,6 @@ async def _ensure_settings(
     session,
     tenant_id,
 ) -> TenantSettings:
-    """
-    Fetch tenant settings.
-
-    Creates the default settings row when one does not exist.
-    """
 
     row = await session.get(
         TenantSettings,
@@ -193,6 +188,7 @@ async def _ensure_settings(
 
 
 class SettingsPatch(BaseModel):
+
     inbound_scanner_enabled: bool | None = None
     pii_redaction_enabled: bool | None = None
     judge_enabled: bool | None = None
@@ -201,6 +197,7 @@ class SettingsPatch(BaseModel):
 
 
 class APIKeyCreate(BaseModel):
+
     name: str = Field(
         min_length=1,
         max_length=120,
@@ -236,7 +233,9 @@ async def get_tenant_me(
         events_count = len(
             (
                 await session.execute(
-                    select(SecurityEvent).where(
+                    select(
+                        SecurityEvent
+                    ).where(
                         SecurityEvent.tenant_id
                         == tenant.tenant_id
                     )
@@ -281,24 +280,24 @@ async def get_settings(
 
     async with async_session() as session:
 
-        settings = await _ensure_settings(
+        row = await _ensure_settings(
             session,
             tenant.tenant_id,
         )
 
         return {
             "inbound_scanner_enabled":
-                settings.inbound_scanner_enabled,
+                row.inbound_scanner_enabled,
             "pii_redaction_enabled":
-                settings.pii_redaction_enabled,
+                row.pii_redaction_enabled,
             "judge_enabled":
-                settings.judge_enabled,
+                row.judge_enabled,
             "alert_sounds":
-                settings.alert_sounds,
+                row.alert_sounds,
             "email_alerts":
-                settings.email_alerts,
+                row.email_alerts,
             "updated_at":
-                settings.updated_at.isoformat(),
+                row.updated_at.isoformat(),
         }
 
 
@@ -488,13 +487,10 @@ async def revoke_api_key(
     )
 
     try:
-
         kid = _uuid.UUID(
             key_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_key_id",
@@ -533,6 +529,7 @@ async def revoke_api_key(
 
 
 class AgentCreate(BaseModel):
+
     name: str = Field(
         min_length=1,
         max_length=120,
@@ -544,11 +541,34 @@ class AgentCreate(BaseModel):
     )
 
     scopes: list[str] = Field(
-        default_factory=list
+        default_factory=lambda: [
+            Capability.AGENT_INVOKE.value
+        ]
     )
+
+    api_key_id: str | None = None
+
+    @field_validator(
+        "scopes"
+    )
+    @classmethod
+    def validate_scopes(
+        cls,
+        value: list[str],
+    ) -> list[str]:
+
+        try:
+            return normalize_capabilities(
+                value
+            )
+        except ValueError as exc:
+            raise ValueError(
+                str(exc)
+            ) from exc
 
 
 class AgentPatch(BaseModel):
+
     name: str | None = Field(
         default=None,
         min_length=1,
@@ -562,7 +582,30 @@ class AgentPatch(BaseModel):
 
     scopes: list[str] | None = None
 
-    status: str | None = None
+    status: AgentStatus | None = None
+
+    api_key_id: str | None = None
+
+    @field_validator(
+        "scopes"
+    )
+    @classmethod
+    def validate_scopes(
+        cls,
+        value: list[str] | None,
+    ) -> list[str] | None:
+
+        if value is None:
+            return None
+
+        try:
+            return normalize_capabilities(
+                value
+            )
+        except ValueError as exc:
+            raise ValueError(
+                str(exc)
+            ) from exc
 
 
 def _agent_to_dict(
@@ -577,9 +620,17 @@ def _agent_to_dict(
         "description":
             agent.description,
         "scopes":
-            agent.scopes,
+            list(agent.scopes or []),
+        "capabilities":
+            list(agent.scopes or []),
         "status":
             agent.status,
+        "api_key_id":
+            (
+                str(agent.api_key_id)
+                if agent.api_key_id
+                else None
+            ),
         "created_at":
             agent.created_at.isoformat(),
         "last_seen_at":
@@ -589,6 +640,83 @@ def _agent_to_dict(
                 else None
             ),
     }
+
+
+async def _validate_api_key_binding(
+    session,
+    tenant_id,
+    raw_api_key_id: str | None,
+    exclude_agent_id=None,
+):
+    """
+    Validate that an API key belongs to this tenant, is active,
+    and is not already bound to another Agent.
+    """
+
+    if raw_api_key_id is None:
+        return None
+
+    try:
+        key_id = _uuid.UUID(
+            raw_api_key_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_api_key_id",
+        ) from exc
+
+    key = await session.get(
+        APIKey,
+        key_id,
+    )
+
+    if key is None:
+        raise HTTPException(
+            status_code=404,
+            detail="api_key_not_found",
+        )
+
+    if key.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=404,
+            detail="api_key_not_found",
+        )
+
+    if key.revoked:
+        raise HTTPException(
+            status_code=409,
+            detail="api_key_revoked",
+        )
+
+    stmt = (
+        select(Agent)
+        .where(
+            Agent.api_key_id
+            == key_id
+        )
+    )
+
+    existing = (
+        await session.execute(
+            stmt
+        )
+    ).scalar_one_or_none()
+
+    if (
+        existing is not None
+        and (
+            exclude_agent_id is None
+            or existing.agent_id
+            != exclude_agent_id
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="api_key_already_bound",
+        )
+
+    return key_id
 
 
 # ============================================================
@@ -622,7 +750,9 @@ async def list_agents(
         ).scalars().all()
 
     return [
-        _agent_to_dict(agent)
+        _agent_to_dict(
+            agent
+        )
         for agent in rows
     ]
 
@@ -640,11 +770,21 @@ async def create_agent(
 
     async with async_session() as session:
 
+        bound_key_id = (
+            await _validate_api_key_binding(
+                session=session,
+                tenant_id=tenant.tenant_id,
+                raw_api_key_id=req.api_key_id,
+            )
+        )
+
         agent = Agent(
             tenant_id=tenant.tenant_id,
             name=req.name.strip(),
             description=req.description.strip(),
             scopes=req.scopes,
+            status="active",
+            api_key_id=bound_key_id,
         )
 
         session.add(
@@ -677,13 +817,10 @@ async def update_agent(
     )
 
     try:
-
         aid = _uuid.UUID(
             agent_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_agent_id",
@@ -706,12 +843,45 @@ async def update_agent(
                 detail="agent_not_found",
             )
 
+        # ----------------------------------------------------
+        # API-key binding
+        # ----------------------------------------------------
+
+        data = req.model_dump(
+            exclude_unset=True
+        )
+
+        if "api_key_id" in data:
+
+            raw_api_key_id = data.pop(
+                "api_key_id"
+            )
+
+            if raw_api_key_id is None:
+
+                agent.api_key_id = None
+
+            else:
+
+                bound_key_id = (
+                    await _validate_api_key_binding(
+                        session=session,
+                        tenant_id=tenant.tenant_id,
+                        raw_api_key_id=raw_api_key_id,
+                        exclude_agent_id=agent.agent_id,
+                    )
+                )
+
+                agent.api_key_id = bound_key_id
+
+        # ----------------------------------------------------
+        # Remaining fields
+        # ----------------------------------------------------
+
         for (
             field,
             value,
-        ) in req.model_dump(
-            exclude_none=True
-        ).items():
+        ) in data.items():
 
             setattr(
                 agent,
@@ -744,13 +914,10 @@ async def delete_agent(
     )
 
     try:
-
         aid = _uuid.UUID(
             agent_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_agent_id",
@@ -791,6 +958,7 @@ async def delete_agent(
 
 
 class PolicyRule(BaseModel):
+
     tool_pattern: str = Field(
         min_length=1,
         max_length=120,
@@ -810,6 +978,7 @@ class PolicyRule(BaseModel):
 
 
 class PolicyCreate(BaseModel):
+
     name: str = Field(
         min_length=1,
         max_length=120,
@@ -833,6 +1002,7 @@ class PolicyCreate(BaseModel):
 
 
 class PolicyPatch(BaseModel):
+
     name: str | None = Field(
         default=None,
         min_length=1,
@@ -911,7 +1081,9 @@ async def list_policies(
         ).scalars().all()
 
     return [
-        _policy_to_dict(policy)
+        _policy_to_dict(
+            policy
+        )
         for policy in rows
     ]
 
@@ -971,13 +1143,10 @@ async def update_policy(
     )
 
     try:
-
         pid = _uuid.UUID(
             policy_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_policy_id",
@@ -1003,13 +1172,6 @@ async def update_policy(
         data = req.model_dump(
             exclude_none=True
         )
-
-        if "rules" in data:
-
-            data["rules"] = [
-                rule
-                for rule in data["rules"]
-            ]
 
         for (
             field,
@@ -1047,13 +1209,10 @@ async def delete_policy(
     )
 
     try:
-
         pid = _uuid.UUID(
             policy_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_policy_id",
@@ -1084,7 +1243,8 @@ async def delete_policy(
 
     return {
         "ok": True,
-        "policy_id": policy_id,
+        "policy_id":
+            policy_id,
     }
 
 
@@ -1094,6 +1254,7 @@ async def delete_policy(
 
 
 class WebhookCreate(BaseModel):
+
     url: str = Field(
         min_length=1,
         max_length=500,
@@ -1105,13 +1266,16 @@ class WebhookCreate(BaseModel):
     )
 
     events: list[str] = Field(
-        default_factory=lambda: ["blocked"]
+        default_factory=lambda: [
+            "blocked"
+        ]
     )
 
     active: bool = True
 
 
 class WebhookPatch(BaseModel):
+
     url: str | None = Field(
         default=None,
         min_length=1,
@@ -1250,13 +1414,10 @@ async def update_webhook(
     )
 
     try:
-
         wid = _uuid.UUID(
             webhook_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_webhook_id",
@@ -1317,13 +1478,10 @@ async def delete_webhook(
     )
 
     try:
-
         wid = _uuid.UUID(
             webhook_id
         )
-
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail="invalid_webhook_id",
