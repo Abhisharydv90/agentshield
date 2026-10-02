@@ -301,7 +301,6 @@ async def write_event(
 async def verify_chain(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    limit: int = 10000,
 ) -> dict:
 
     stmt = (
@@ -316,7 +315,6 @@ async def verify_chain(
             SecurityEvent.timestamp.asc(),
             SecurityEvent.event_id.asc(),
         )
-        .limit(limit)
     )
 
     events = (
