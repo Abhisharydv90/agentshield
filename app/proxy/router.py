@@ -17,6 +17,8 @@ Request path:
         ↓
     proposed tool-call authorization
         ↓
+    Security Decision Engine
+        ↓
     downstream Agent
 """
 
@@ -76,7 +78,6 @@ router = APIRouter(
 # Policy
 # ============================================================
 
-
 async def _load_active_policy(
     tenant_id,
 ) -> tuple[Policy, str]:
@@ -85,9 +86,7 @@ async def _load_active_policy(
 
         row = (
             await session.execute(
-                select(
-                    PolicyModel
-                )
+                select(PolicyModel)
                 .where(
                     PolicyModel.tenant_id
                     == tenant_id
@@ -121,7 +120,6 @@ async def _load_active_policy(
 # Agent activity
 # ============================================================
 
-
 async def _touch_agent(
     agent_id,
     tenant_id,
@@ -132,9 +130,7 @@ async def _touch_agent(
         async with async_session() as session:
 
             await session.execute(
-                update(
-                    Agent
-                )
+                update(Agent)
                 .where(
                     Agent.agent_id
                     == agent_id
@@ -148,10 +144,11 @@ async def _touch_agent(
                     == "active"
                 )
                 .values(
-                    last_seen_at=
+                    last_seen_at=(
                         datetime.now(
                             timezone.utc
                         )
+                    )
                 )
             )
 
@@ -164,7 +161,6 @@ async def _touch_agent(
 # ============================================================
 # Runtime endpoint
 # ============================================================
-
 
 @router.post(
     "/chat/completions"
@@ -211,7 +207,7 @@ async def chat_completions(
         )
 
     # --------------------------------------------------------
-    # Agent itself needs permission to invoke the gateway.
+    # Gateway invocation capability
     # --------------------------------------------------------
 
     require_capability(
@@ -226,6 +222,13 @@ async def chat_completions(
 
     tenant_id = tenant.tenant_id
     tenant_slug = tenant.slug
+
+    # IMPORTANT:
+    #
+    # This authenticated Agent ID is now carried through the complete
+    # downstream authorization path.
+    agent_id = agent.agent_id
+
     agent_scopes = list(
         agent.scopes or []
     )
@@ -275,11 +278,13 @@ async def chat_completions(
                     session=session,
                     tenant_id=tenant_id,
                     request_id=trace_id,
-                    threat_category=
-                        "injection_attempt",
+                    threat_category=(
+                        "injection_attempt"
+                    ),
                     action_taken="blocked",
-                    evaluator_reasoning=
-                        injection_verdict.reason,
+                    evaluator_reasoning=(
+                        injection_verdict.reason
+                    ),
                 )
 
         except Exception:
@@ -322,16 +327,17 @@ async def chat_completions(
                         session=session,
                         tenant_id=tenant_id,
                         request_id=trace_id,
-                        threat_category=
-                            "pii_leak",
-                        action_taken=
-                            "redacted",
-                        evaluator_reasoning=
-                            (
-                                "redacted "
-                                f"{len(redacted_map)} "
-                                "entities"
-                            ),
+                        threat_category=(
+                            "pii_leak"
+                        ),
+                        action_taken=(
+                            "redacted"
+                        ),
+                        evaluator_reasoning=(
+                            "redacted "
+                            f"{len(redacted_map)} "
+                            "entities"
+                        ),
                     )
 
             except Exception:
@@ -360,8 +366,7 @@ async def chat_completions(
     }
 
     client = httpx.AsyncClient(
-        timeout=
-            settings.UPSTREAM_TIMEOUT
+        timeout=settings.UPSTREAM_TIMEOUT
     )
 
     try:
@@ -435,6 +440,8 @@ async def chat_completions(
                             tenant_id,
                         agent_scopes=
                             agent_scopes,
+                        agent_id=
+                            agent_id,
                     )
                 ):
 
@@ -468,7 +475,7 @@ async def chat_completions(
                 await upstream_resp.aread()
             )
 
-            # Never inspect error responses as tool proposals.
+            # Never inspect upstream error responses as tool proposals.
             if upstream_resp.status_code < 400:
 
                 denial = (
@@ -485,13 +492,17 @@ async def chat_completions(
                             tenant_id,
                         agent_scopes=
                             agent_scopes,
+                        agent_id=
+                            agent_id,
                     )
                 )
 
                 if denial is not None:
 
                     return JSONResponse(
-                        status_code=403,
+                        status_code=(
+                            403
+                        ),
                         content=denial,
                     )
 

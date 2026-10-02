@@ -4,15 +4,19 @@ Outbound tool-call authorization.
 Tool-call proposals are buffered/inspected before they are exposed
 to the downstream Agent.
 
-This is proposal authorization at the gateway; a later AgentShield
-runtime will provide the stronger execution boundary.
+The Security Decision Engine receives the authenticated Agent ID so
+the action is bound to the actual runtime identity.
 """
 
 from __future__ import annotations
 
 import json
 import uuid as _uuid
-from typing import AsyncIterator, Iterable, Any
+from typing import (
+    Any,
+    AsyncIterator,
+    Iterable,
+)
 
 from app.policy.dsl import Policy
 from app.security.judge.evaluate import (
@@ -22,6 +26,10 @@ from app.security.judge.stream_buffer import (
     StreamingToolCallGate,
 )
 
+
+# ============================================================
+# OpenAI-compatible tool-call normalization
+# ============================================================
 
 def _safe_tool_call_from_openai(
     tool_call: dict[str, Any],
@@ -92,6 +100,10 @@ def _safe_tool_call_from_openai(
     }
 
 
+# ============================================================
+# Streaming authorization
+# ============================================================
+
 async def process_outbound_stream(
     upstream_iterator: AsyncIterator[bytes],
     policy: Policy,
@@ -99,6 +111,7 @@ async def process_outbound_stream(
     trace_id: str,
     tenant_id: _uuid.UUID,
     agent_scopes: Iterable[str],
+    agent_id: _uuid.UUID | None = None,
 ) -> AsyncIterator[bytes]:
 
     gate = StreamingToolCallGate()
@@ -195,7 +208,8 @@ async def process_outbound_stream(
                                     "arguments"
                                 ),
                         },
-                        policy=policy,
+                        policy=
+                            policy,
                         policy_version=
                             policy_version,
                         tenant_id=
@@ -204,6 +218,8 @@ async def process_outbound_stream(
                             trace_id,
                         agent_scopes=
                             agent_scopes,
+                        agent_id=
+                            agent_id,
                     )
                 )
 
@@ -213,13 +229,23 @@ async def process_outbound_stream(
 
                 if decision != "allow":
 
-                    error_name = (
-                        "tool_call_denied"
-                        if decision
-                        == "deny"
-                        else
-                        "tool_call_approval_required"
-                    )
+                    if decision == "deny":
+                        error_name = (
+                            "tool_call_denied"
+                        )
+
+                    elif (
+                        decision
+                        == "approval_required"
+                    ):
+                        error_name = (
+                            "tool_call_approval_required"
+                        )
+
+                    else:
+                        error_name = (
+                            "tool_call_blocked"
+                        )
 
                     denial = {
                         "error":
@@ -235,6 +261,18 @@ async def process_outbound_stream(
                         "missing_capabilities":
                             verdict.get(
                                 "missing_capabilities"
+                            ),
+                        "approval_id":
+                            verdict.get(
+                                "approval_id"
+                            ),
+                        "action_fingerprint":
+                            verdict.get(
+                                "action_fingerprint"
+                            ),
+                        "policy_version":
+                            verdict.get(
+                                "policy_version"
                             ),
                         "trace_id":
                             trace_id,
@@ -260,6 +298,10 @@ async def process_outbound_stream(
                 approved_calls.append(
                     call
                 )
+
+            # ------------------------------------------------
+            # Only approved calls become visible downstream.
+            # ------------------------------------------------
 
             tool_call_deltas = []
 
@@ -337,6 +379,10 @@ async def process_outbound_stream(
             )
 
 
+# ============================================================
+# Non-streaming authorization
+# ============================================================
+
 async def authorize_non_streaming_response(
     body: bytes,
     policy: Policy,
@@ -344,6 +390,7 @@ async def authorize_non_streaming_response(
     trace_id: str,
     tenant_id: _uuid.UUID,
     agent_scopes: Iterable[str],
+    agent_id: _uuid.UUID | None = None,
 ) -> dict | None:
 
     try:
@@ -446,6 +493,8 @@ async def authorize_non_streaming_response(
                 trace_id=trace_id,
                 agent_scopes=
                     agent_scopes,
+                agent_id=
+                    agent_id,
             )
         )
 
@@ -453,17 +502,31 @@ async def authorize_non_streaming_response(
             "decision"
         ) != "allow":
 
+            decision = verdict.get(
+                "decision"
+            )
+
+            if decision == "deny":
+                error_name = (
+                    "tool_call_denied"
+                )
+
+            elif (
+                decision
+                == "approval_required"
+            ):
+                error_name = (
+                    "tool_call_approval_required"
+                )
+
+            else:
+                error_name = (
+                    "tool_call_blocked"
+                )
+
             return {
                 "error":
-                    (
-                        "tool_call_denied"
-                        if verdict.get(
-                            "decision"
-                        )
-                        == "deny"
-                        else
-                        "tool_call_approval_required"
-                    ),
+                    error_name,
                 "reason":
                     verdict.get(
                         "reason"
@@ -475,6 +538,18 @@ async def authorize_non_streaming_response(
                 "missing_capabilities":
                     verdict.get(
                         "missing_capabilities"
+                    ),
+                "approval_id":
+                    verdict.get(
+                        "approval_id"
+                    ),
+                "action_fingerprint":
+                    verdict.get(
+                        "action_fingerprint"
+                    ),
+                "policy_version":
+                    verdict.get(
+                        "policy_version"
                     ),
                 "trace_id":
                     trace_id,
