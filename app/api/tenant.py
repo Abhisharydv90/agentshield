@@ -18,10 +18,12 @@ Capabilities are validated against the controlled vocabulary in:
 
 from __future__ import annotations
 
+import ipaddress
 import secrets as _secrets
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -1248,6 +1250,39 @@ async def delete_policy(
     }
 
 
+def _validate_webhook_url(value: str) -> str:
+    url = value.strip()
+    parsed = urlsplit(url)
+
+    if parsed.scheme not in {"https", "http"}:
+        raise ValueError("webhook_url_scheme_not_allowed")
+    if parsed.username or parsed.password:
+        raise ValueError("webhook_url_userinfo_not_allowed")
+    if not parsed.hostname:
+        raise ValueError("webhook_url_host_required")
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname in {"localhost", "localhost.localdomain"}:
+        raise ValueError("webhook_url_private_host_not_allowed")
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+
+    if address is not None and (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        raise ValueError("webhook_url_private_host_not_allowed")
+
+    return url
+
+
 # ============================================================
 # Webhook schemas
 # ============================================================
@@ -1273,6 +1308,14 @@ class WebhookCreate(BaseModel):
 
     active: bool = True
 
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        try:
+            return _validate_webhook_url(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
 
 class WebhookPatch(BaseModel):
 
@@ -1290,6 +1333,16 @@ class WebhookPatch(BaseModel):
     events: list[str] | None = None
 
     active: bool | None = None
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return _validate_webhook_url(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 def _webhook_to_dict(
