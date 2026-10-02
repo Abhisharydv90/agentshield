@@ -186,6 +186,7 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------
 
     RATE_LIMIT_FAIL_OPEN: bool = False
+    TRUSTED_PROXY_IPS: str = ""
 
     # ---------------------------------------------------------
     # Validators
@@ -252,6 +253,14 @@ class Settings(BaseSettings):
             self.DATABASE_REQUIRE_SSL = True
 
         return self
+
+    @property
+    def trusted_proxy_ips(self) -> list[str]:
+        return [
+            value.strip()
+            for value in self.TRUSTED_PROXY_IPS.split(",")
+            if value.strip()
+        ]
 
     @property
     def cors_origins(self) -> list[str]:
