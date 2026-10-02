@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
+from app.middleware.trace import get_trace_id
 from app.middleware.auth import AuthMiddleware
 from app.middleware.csrf import CSRFMiddleware
 from app.middleware.ratelimit import RateLimitMiddleware
@@ -121,7 +122,7 @@ class TraceMiddleware:
             k.decode().lower(): v.decode()
             for k, v in scope.get("headers", [])
         }
-        trace_id = headers.get("x-trace-id") or str(uuid.uuid4())
+        trace_id = get_trace_id(Request(scope))
 
         state = scope.setdefault("state", {})
         state["trace_id"] = trace_id
