@@ -116,17 +116,22 @@ async def process_outbound_stream(
 ) -> AsyncIterator[bytes]:
 
     gate = StreamingToolCallGate()
+    # SSE records may be split across arbitrary network chunks. Keep the
+    # incomplete UTF-8/SSE record buffered until a complete line is available.
+    line_buffer = b""
 
     async for raw_chunk in upstream_iterator:
+        line_buffer += raw_chunk
 
-        text = raw_chunk.decode(
-            "utf-8",
-            errors="replace",
-        )
+        while b"\n" in line_buffer:
+            raw_line, line_buffer = line_buffer.split(b"\n", 1)
+            raw_line = raw_line.rstrip(b"\r")
 
-        for line in text.split(
-            "\n"
-        ):
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError:
+                # Do not forward malformed/partial protocol data.
+                continue
 
             if not line.strip():
                 continue
@@ -381,6 +386,17 @@ async def process_outbound_stream(
                 "utf-8"
             )
 
+    # A complete SSE line is required before forwarding. Do not emit an
+    # unterminated partial event at the end of the upstream stream.
+    if line_buffer.strip():
+        try:
+            trailing = line_buffer.decode("utf-8")
+        except UnicodeDecodeError:
+            trailing = ""
+        if trailing.strip():
+            # The upstream stream ended with malformed/incomplete framing.
+            # Fail closed rather than forwarding ambiguous content.
+            raise RuntimeError("malformed_sse_stream")
 
 # ============================================================
 # Non-streaming authorization
