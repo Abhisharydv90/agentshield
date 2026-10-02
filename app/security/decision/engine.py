@@ -37,6 +37,40 @@ from app.security.decision.contract import (
 )
 
 
+_SENSITIVE_KEY_MARKERS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "credential",
+    "cookie",
+)
+
+
+def _redact_approval_value(value: Any, key: str | None = None) -> Any:
+    if key and any(marker in key.lower() for marker in _SENSITIVE_KEY_MARKERS):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            str(k): _redact_approval_value(v, str(k))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_approval_value(v, None) for v in value]
+    if isinstance(value, tuple):
+        return [_redact_approval_value(v, None) for v in value]
+    return value
+
+
+def _redact_approval_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return _redact_approval_value(payload)
+
+
 # ============================================================
 # Result
 # ============================================================
@@ -260,7 +294,12 @@ class SecurityDecisionEngine:
             action_fingerprint=(
                 action.fingerprint()
             ),
-            action_payload=action.to_dict(),
+            # The fingerprint binds the exact original action. The human
+            # review copy is separately redacted so approval storage/UI does
+            # not become a second raw-secret/PII persistence layer.
+            action_payload=_redact_approval_payload(
+                action.to_dict()
+            ),
             policy_version=(
                 action.policy_version
             ),
