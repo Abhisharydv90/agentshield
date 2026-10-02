@@ -263,6 +263,124 @@ async def _request_human_approval(
         }
 
 
+
+# ============================================================
+# Approval consumption
+# ============================================================
+
+def _parse_approval_id(
+    approval_id: str | uuid.UUID | None,
+) -> uuid.UUID | None:
+    """Parse the runtime approval identifier without accepting arbitrary text."""
+    if approval_id is None:
+        return None
+
+    if isinstance(approval_id, uuid.UUID):
+        return approval_id
+
+    try:
+        return uuid.UUID(str(approval_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _action_with_approval_trace(
+    *,
+    action: SecurityAction,
+    approval_trace_id: str,
+) -> SecurityAction:
+    """
+    Rebuild the same security action using the trace ID bound to the
+    persisted approval.
+
+    trace_id is an event/request identifier. The approval fingerprint is
+    bound to the original action context, so a legitimate retry may have a
+    fresh transport trace while still referring to the exact approved action.
+    """
+    return SecurityAction(
+        tenant_id=action.tenant_id,
+        agent_id=action.agent_id,
+        trace_id=approval_trace_id,
+        tool_name=action.tool_name,
+        operation=action.operation,
+        target=action.target,
+        arguments=action.arguments,
+        capabilities=action.capabilities,
+        policy_version=action.policy_version,
+        provenance=action.provenance,
+    )
+
+
+async def _consume_approval(
+    *,
+    action: SecurityAction,
+    approval_id: str | uuid.UUID,
+) -> dict | None:
+    """
+    Consume one approved artifact exactly once.
+
+    Returns None when consumption succeeds. Otherwise returns a structured
+    denial. The engine performs tenant scoping, exact fingerprint matching,
+    state validation, expiry validation, and the one-time state transition.
+    """
+    parsed_id = _parse_approval_id(approval_id)
+    if parsed_id is None:
+        return {
+            "decision": "deny",
+            "reason": "approval_invalid_id",
+            "category": "privilege_escalation",
+            "approval_id": str(approval_id)[:128],
+            "action_fingerprint": action.fingerprint(),
+        }
+
+    async with async_session() as session:
+        engine = SecurityDecisionEngine(session)
+
+        approval = await engine.get_approval(
+            parsed_id,
+            action.tenant_id,
+        )
+
+        if approval is None:
+            return {
+                "decision": "deny",
+                "reason": "approval_not_found",
+                "category": "privilege_escalation",
+                "approval_id": str(parsed_id),
+                "action_fingerprint": action.fingerprint(),
+            }
+
+        expected_action = _action_with_approval_trace(
+            action=action,
+            approval_trace_id=approval.trace_id,
+        )
+        expected_fingerprint = expected_action.fingerprint()
+
+        try:
+            consumed = await engine.consume(
+                approval_id=parsed_id,
+                tenant_id=action.tenant_id,
+                expected_action_fingerprint=expected_fingerprint,
+            )
+            await session.commit()
+        except ValueError as exc:
+            await session.rollback()
+            return {
+                "decision": "deny",
+                "reason": f"approval_consumption_failed:{str(exc)}",
+                "category": "privilege_escalation",
+                "approval_id": str(parsed_id),
+                "action_fingerprint": expected_fingerprint,
+                "policy_version": action.policy_version,
+            }
+
+        return {
+            "_consumed": True,
+            "approval_id": str(consumed.approval_id),
+            "action_fingerprint": consumed.action_fingerprint,
+        }
+
+
 # ============================================================
 # Main pipeline
 # ============================================================
@@ -275,6 +393,7 @@ async def execute_tool_with_judge(
     trace_id: str | None = None,
     agent_scopes: Iterable[str] | None = None,
     agent_id: uuid.UUID | None = None,
+    approval_id: str | uuid.UUID | None = None,
 ) -> dict:
     """
     Full runtime security pipeline.
@@ -300,6 +419,7 @@ async def execute_tool_with_judge(
     scopes = list(
         agent_scopes or []
     )
+    approved_continuation = False
 
     # ========================================================
     # Layer 1 — normalization
@@ -473,30 +593,40 @@ async def execute_tool_with_judge(
                 trace_id=trace_id,
             )
 
-            return await _request_human_approval(
-                action=action
+            if approval_id is not None:
+                # A supplied approval may only be consumed for a policy
+                # step-up action. We defer consumption until the remaining
+                # runtime checks have passed so a judge denial does not burn
+                # the approval artifact.
+                approved_continuation = True
+
+            else:
+                return await _request_human_approval(
+                    action=action
+                )
+
+        else:
+
+            # ------------------------------------------------
+            # Compatibility path
+            # ------------------------------------------------
+
+            await _log(
+                tenant_id,
+                trace_id,
+                "privilege_escalation",
+                "step_up_approval",
+                policy_verdict.reason,
             )
 
-        # ----------------------------------------------------
-        # Compatibility path
-        # ----------------------------------------------------
-
-        await _log(
-            tenant_id,
-            trace_id,
-            "privilege_escalation",
-            "step_up_approval",
-            policy_verdict.reason,
-        )
-
-        return {
-            "decision": "step_up",
-            "reason": policy_verdict.reason,
-            "category": (
-                "privilege_escalation"
-            ),
-            "policy_version": policy_version,
-        }
+            return {
+                "decision": "step_up",
+                "reason": policy_verdict.reason,
+                "category": (
+                    "privilege_escalation"
+                ),
+                "policy_version": policy_version,
+            }
 
     # ========================================================
     # Layer 5 — Judge control
@@ -512,6 +642,52 @@ async def execute_tool_with_judge(
             "llm_judge_disabled"
         )
 
+        if approved_continuation:
+            consumed = await _consume_approval(
+                action=action,
+                approval_id=approval_id,  # type: ignore[arg-type]
+            )
+            if consumed is not None:
+                consumed["policy_version"] = policy_version
+                consumed["trace_id"] = trace_id
+
+                # A successful consume is an authorization result, so expose
+                # the fingerprint of the persisted artifact, not the fresh
+                # transport-trace variant of the action.
+                if consumed.get("_consumed") is True:
+                    await _log(
+                        tenant_id,
+                        trace_id,
+                        "privilege_escalation",
+                        "allowed",
+                        "approved_action_consumed",
+                    )
+                    return {
+                        "decision": "allow",
+                        "risk": 0.0,
+                        "reason": (
+                            "deterministic_policy_allow;"
+                            "llm_judge_disabled;"
+                            "approved_action_consumed"
+                        ),
+                        "category": "benign",
+                        "policy_version": policy_version,
+                        "approval_id": consumed.get("approval_id"),
+                        "action_fingerprint": consumed.get(
+                            "action_fingerprint"
+                        ),
+                        "trace_id": trace_id,
+                    }
+
+                await _log(
+                    tenant_id,
+                    trace_id,
+                    "privilege_escalation",
+                    "blocked",
+                    consumed["reason"],
+                )
+                return consumed
+
         await _log(
             tenant_id,
             trace_id,
@@ -526,6 +702,16 @@ async def execute_tool_with_judge(
             "reason": reason,
             "category": "benign",
             "policy_version": policy_version,
+            "approval_id": (
+                str(approval_id)
+                if approved_continuation and approval_id
+                else None
+            ),
+            "action_fingerprint": (
+                action.fingerprint()
+                if approved_continuation
+                else None
+            ),
         }
 
     # ========================================================
@@ -601,6 +787,41 @@ async def execute_tool_with_judge(
         )
 
     # ========================================================
+    # Approval consumption
+    # ========================================================
+
+    consumed_fingerprint: str | None = None
+
+    if (
+        approved_continuation
+        and verdict.decision == "allow"
+    ):
+
+        consumed = await _consume_approval(
+            action=action,
+            approval_id=approval_id,  # type: ignore[arg-type]
+        )
+
+        if consumed is not None:
+            consumed["policy_version"] = policy_version
+            consumed["trace_id"] = trace_id
+
+            if consumed.get("_consumed") is True:
+                consumed_fingerprint = consumed.get(
+                    "action_fingerprint"
+                )
+            else:
+                await _log(
+                    tenant_id,
+                    trace_id,
+                    "privilege_escalation",
+                    "blocked",
+                    consumed["reason"],
+                )
+
+                return consumed
+
+    # ========================================================
     # Layer 7 — audit
     # ========================================================
 
@@ -624,6 +845,20 @@ async def execute_tool_with_judge(
         "risk": verdict.risk,
         "category": verdict.category,
         "policy_version": verdict.policy_version,
+        "approval_id": (
+            str(approval_id)
+            if approved_continuation and approval_id
+            else None
+        ),
+        "action_fingerprint": (
+            consumed_fingerprint
+            if consumed_fingerprint is not None
+            else (
+                action.fingerprint()
+                if approved_continuation
+                else None
+            )
+        ),
     }
 
 

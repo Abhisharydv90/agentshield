@@ -233,6 +233,13 @@ async def chat_completions(
         agent.scopes or []
     )
 
+    # Approval ID is only a reference to a persisted artifact.
+    # The Security Decision Engine independently validates tenant,
+    # identity, action fingerprint, state, and one-time consumption.
+    approval_id = request.headers.get(
+        "X-AgentShield-Approval-Id"
+    )
+
     # ========================================================
     # Request body
     # ========================================================
@@ -442,6 +449,8 @@ async def chat_completions(
                             agent_scopes,
                         agent_id=
                             agent_id,
+                        approval_id=
+                            approval_id,
                     )
                 ):
 
@@ -494,6 +503,8 @@ async def chat_completions(
                             agent_scopes,
                         agent_id=
                             agent_id,
+                        approval_id=
+                            approval_id,
                     )
                 )
 

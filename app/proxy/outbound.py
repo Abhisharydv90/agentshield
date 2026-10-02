@@ -112,6 +112,7 @@ async def process_outbound_stream(
     tenant_id: _uuid.UUID,
     agent_scopes: Iterable[str],
     agent_id: _uuid.UUID | None = None,
+    approval_id: str | _uuid.UUID | None = None,
 ) -> AsyncIterator[bytes]:
 
     gate = StreamingToolCallGate()
@@ -220,6 +221,8 @@ async def process_outbound_stream(
                             agent_scopes,
                         agent_id=
                             agent_id,
+                        approval_id=
+                            approval_id,
                     )
                 )
 
@@ -391,6 +394,7 @@ async def authorize_non_streaming_response(
     tenant_id: _uuid.UUID,
     agent_scopes: Iterable[str],
     agent_id: _uuid.UUID | None = None,
+    approval_id: str | _uuid.UUID | None = None,
 ) -> dict | None:
 
     try:
@@ -495,6 +499,8 @@ async def authorize_non_streaming_response(
                     agent_scopes,
                 agent_id=
                     agent_id,
+                approval_id=
+                    approval_id,
             )
         )
 
