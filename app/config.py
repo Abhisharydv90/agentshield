@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -187,6 +188,12 @@ class Settings(BaseSettings):
 
     RATE_LIMIT_FAIL_OPEN: bool = False
     TRUSTED_PROXY_IPS: str = ""
+    TRUSTED_HOSTS: str = ""
+    MAX_REQUEST_BODY_BYTES: int = Field(
+        default=2 * 1024 * 1024,
+        ge=64 * 1024,
+        le=16 * 1024 * 1024,
+    )
 
     # ---------------------------------------------------------
     # Validators
@@ -226,6 +233,18 @@ class Settings(BaseSettings):
         Prevent accidental insecure production configuration.
         """
 
+        # Parse proxy networks at startup so malformed trust configuration
+        # cannot silently degrade into an unexpected runtime policy.
+        for network in self.TRUSTED_PROXY_IPS.split(","):
+            network = network.strip()
+            if network:
+                try:
+                    ipaddress.ip_network(network, strict=False)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid TRUSTED_PROXY_IPS entry: {network}"
+                    ) from exc
+
         if self.ENV in {"staging", "prod"}:
             if not self.SECRET_KEY:
                 raise ValueError(
@@ -252,7 +271,47 @@ class Settings(BaseSettings):
 
             self.DATABASE_REQUIRE_SSL = True
 
+            trusted_hosts = [
+                value.strip()
+                for value in self.TRUSTED_HOSTS.split(",")
+                if value.strip()
+            ]
+            if not trusted_hosts:
+                raise ValueError(
+                    "TRUSTED_HOSTS must be explicitly configured in staging/production."
+                )
+            if any(host == "*" for host in trusted_hosts):
+                raise ValueError(
+                    "Wildcard TRUSTED_HOSTS is not permitted in staging/production."
+                )
+
+            origins = self.cors_origins
+            if not origins:
+                raise ValueError(
+                    "CORS_ORIGINS must be explicitly configured in staging/production."
+                )
+            if any(
+                origin.startswith(("http://localhost", "http://127.0.0.1"))
+                for origin in origins
+            ):
+                raise ValueError(
+                    "Development CORS origins are not permitted in staging/production."
+                )
+
+            if not self.REDIS_URL.lower().startswith("rediss://"):
+                raise ValueError(
+                    "REDIS_URL must use rediss:// in staging/production."
+                )
+
         return self
+
+    @property
+    def trusted_hosts(self) -> list[str]:
+        return [
+            value.strip()
+            for value in self.TRUSTED_HOSTS.split(",")
+            if value.strip()
+        ]
 
     @property
     def trusted_proxy_ips(self) -> list[str]:
