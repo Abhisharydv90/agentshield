@@ -1175,6 +1175,17 @@ async def update_policy(
             exclude_none=True
         )
 
+        # Runtime approvals bind to policy.version. Therefore changing rules
+        # without changing the version would allow an approval created under
+        # one policy body to be consumed after the body changed.
+        if "rules" in data and data["rules"] != policy.rules:
+            requested_version = data.get("version")
+            if not requested_version or requested_version == policy.version:
+                raise HTTPException(
+                    status_code=409,
+                    detail="policy_version_must_change_when_rules_change",
+                )
+
         for (
             field,
             value,
