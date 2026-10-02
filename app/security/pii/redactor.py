@@ -1,66 +1,294 @@
 """
-PII Redactor — detects and replaces sensitive entities with reversible placeholders.
-Uses Microsoft Presidio for detection, HMAC for tamper-proof placeholder generation.
+PII redaction.
+
+Sensitive values are replaced with deterministic placeholders.
+
+Security properties:
+
+- No hard-coded production secret.
+- Placeholder MAC is scoped to tenant + trace + original value.
+- Development may use an ephemeral process secret.
+- Production/staging require the configured SECRET_KEY.
+- Raw values are persisted only through the PII vault.
 """
+
+from __future__ import annotations
+
 import hashlib
 import hmac
+import secrets
+
 from presidio_analyzer import AnalyzerEngine
+
 from app.config import settings
 from app.security.pii.vault import vault
 
+
+# ============================================================
+# Analyzer
+# ============================================================
+
+
 _analyzer = AnalyzerEngine()
-_entities = [e.strip() for e in settings.PII_ENTITIES.split(",") if e.strip()]
 
-# Per-tenant HMAC secret — in production this comes from KMS per tenant.
-# For now, derive from a base secret. Rotate per environment.
-_BASE_SECRET = b"agentshield-dev-secret-rotate-in-prod"
+_entities = [
+    entity.strip()
+    for entity
+    in settings.PII_ENTITIES.split(",")
+    if entity.strip()
+]
 
 
-def _make_placeholder(kind: str, value: str, trace_id: str) -> str:
-    """Deterministic, non-guessable placeholder scoped to a trace."""
-    mac = hmac.new(_BASE_SECRET, f"{trace_id}:{value}".encode(), hashlib.sha256).hexdigest()
-    return f"<{kind.upper()}_{mac[:12]}>"
+# ============================================================
+# Placeholder secret
+# ============================================================
+
+
+if settings.SECRET_KEY.strip():
+
+    _PII_SECRET = hashlib.sha256(
+        (
+            "agentshield:pii:v1:"
+            + settings.SECRET_KEY
+        ).encode(
+            "utf-8"
+        )
+    ).digest()
+
+elif settings.ENV == "dev":
+
+    # Development-only ephemeral key.
+    #
+    # It intentionally changes between process restarts.
+    # This avoids embedding a reusable secret in source code.
+    _PII_SECRET = secrets.token_bytes(
+        32
+    )
+
+else:
+
+    raise RuntimeError(
+        "SECRET_KEY must be configured "
+        "before PII protection can run "
+        "outside development."
+    )
+
+
+# ============================================================
+# Placeholder
+# ============================================================
+
+
+def _make_placeholder(
+    kind: str,
+    value: str,
+    trace_id: str,
+    tenant: str,
+) -> str:
+    """
+    Create a trace + tenant scoped HMAC placeholder.
+    """
+
+    message = (
+        f"v1|{tenant}|"
+        f"{trace_id}|"
+        f"{kind}|"
+        f"{value}"
+    )
+
+    mac = hmac.new(
+        _PII_SECRET,
+        message.encode(
+            "utf-8"
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return (
+        f"<{kind.upper()}_"
+        f"{mac[:16]}>"
+    )
+
+
+# ============================================================
+# Redactor
+# ============================================================
 
 
 class PIIRedactor:
-    def __init__(self, tenant: str = "default"):
+
+    def __init__(
+        self,
+        tenant: str = "default",
+    ) -> None:
+
         self.tenant = tenant
 
-    def _redact_string(self, text: str, trace_id: str, collected: dict[str, str]) -> str:
-        results = _analyzer.analyze(text=text, language="en", entities=_entities)
+    def _redact_string(
+        self,
+        text: str,
+        trace_id: str,
+        collected: dict[str, str],
+    ) -> str:
+
+        results = _analyzer.analyze(
+            text=text,
+            language="en",
+            entities=_entities,
+        )
+
         if not results:
             return text
-        # Sort by start descending so we don't invalidate indices
-        for r in sorted(results, key=lambda x: x.start, reverse=True):
-            raw = text[r.start:r.end]
+
+        # Work from right to left so replacement does not
+        # invalidate Presidio's original offsets.
+        for result in sorted(
+            results,
+            key=lambda item:
+                item.start,
+            reverse=True,
+        ):
+
+            raw = text[
+                result.start:
+                result.end
+            ]
+
             if not raw.strip():
                 continue
-            placeholder = _make_placeholder(r.entity_type, raw, trace_id)
-            collected[placeholder] = raw
-            text = text[:r.start] + placeholder + text[r.end:]
+
+            placeholder = (
+                _make_placeholder(
+                    kind=
+                        result.entity_type,
+                    value=
+                        raw,
+                    trace_id=
+                        trace_id,
+                    tenant=
+                        self.tenant,
+                )
+            )
+
+            collected[
+                placeholder
+            ] = raw
+
+            text = (
+                text[:result.start]
+                + placeholder
+                + text[result.end:]
+            )
+
         return text
 
-    def _walk(self, node, trace_id: str, collected: dict[str, str]):
-        if isinstance(node, str):
-            return self._redact_string(node, trace_id, collected)
-        if isinstance(node, dict):
-            return {k: self._walk(v, trace_id, collected) for k, v in node.items()}
-        if isinstance(node, list):
-            return [self._walk(v, trace_id, collected) for v in node]
+    def _walk(
+        self,
+        node,
+        trace_id: str,
+        collected: dict[str, str],
+    ):
+
+        if isinstance(
+            node,
+            str,
+        ):
+
+            return self._redact_string(
+                node,
+                trace_id,
+                collected,
+            )
+
+        if isinstance(
+            node,
+            dict,
+        ):
+
+            return {
+                key:
+                    self._walk(
+                        value,
+                        trace_id,
+                        collected,
+                    )
+                for key, value
+                in node.items()
+            }
+
+        if isinstance(
+            node,
+            list,
+        ):
+
+            return [
+                self._walk(
+                    item,
+                    trace_id,
+                    collected,
+                )
+                for item in node
+            ]
+
         return node
 
-    async def redact(self, body: dict, trace_id: str) -> tuple[dict, dict[str, str]]:
+    async def redact(
+        self,
+        body: dict,
+        trace_id: str,
+    ) -> tuple[
+        dict,
+        dict[str, str],
+    ]:
         """
-        Returns (redacted_body, placeholder_map).
-        The map is also persisted in the vault for later rehydration.
+        Return:
+
+            redacted_body
+            placeholder_map
+
+        The raw map is stored in the secure vault.
+
+        If the vault is unavailable, this function raises rather
+        than silently returning unprotected PII.
         """
-        collected: dict[str, str] = {}
-        redacted = self._walk(body, trace_id, collected)
+
+        collected: dict[
+            str,
+            str,
+        ] = {}
+
+        redacted = self._walk(
+            body,
+            trace_id,
+            collected,
+        )
+
         if collected:
-            await vault.store(trace_id, self.tenant, collected)
-        return redacted, collected
+
+            await vault.store(
+                trace_id=
+                    trace_id,
+                tenant=
+                    self.tenant,
+                mapping=
+                    collected,
+            )
+
+        return (
+            redacted,
+            collected,
+        )
 
 
-# Factory — allows per-tenant redactor instances
-def get_redactor(tenant: str = "default") -> PIIRedactor:
-    return PIIRedactor(tenant=tenant)
+# ============================================================
+# Factory
+# ============================================================
+
+
+def get_redactor(
+    tenant: str = "default",
+) -> PIIRedactor:
+
+    return PIIRedactor(
+        tenant=tenant
+    )
