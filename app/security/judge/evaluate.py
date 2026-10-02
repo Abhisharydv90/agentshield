@@ -5,17 +5,18 @@ Pipeline:
 
     1. Normalize
     2. Validate normalized contract
-    3. Enforce Agent capabilities
-    4. Evaluate deterministic policy
+    3. Security Decision Engine
+    4. Deterministic policy
     5. Optional LLM judge
     6. Audit
 
-Security rule:
+The Security Decision Engine is the authoritative runtime identity and
+capability boundary when `agent_id` is supplied.
 
-    Capability denial happens BEFORE the LLM judge.
+Important security rule:
 
-An LLM cannot grant an Agent a capability that its identity does
-not possess.
+    The LLM judge can evaluate risk.
+    It cannot grant capabilities that the Agent does not possess.
 """
 
 from __future__ import annotations
@@ -42,6 +43,13 @@ from app.security.capabilities import (
     required_capabilities_for_operation,
     missing_capabilities,
 )
+from app.security.decision.contract import (
+    SecurityAction,
+    SecurityDecision,
+)
+from app.security.decision.engine import (
+    SecurityDecisionEngine,
+)
 from app.security.judge.contract import (
     JudgeVerdict,
     NormalizedToolCall,
@@ -51,6 +59,10 @@ from app.security.judge.normalize import (
 )
 from app.telemetry.audit import write_event
 
+
+# ============================================================
+# Judge system instruction
+# ============================================================
 
 JUDGE_SYSTEM = """
 You are the AgentShield security judge.
@@ -77,6 +89,9 @@ Rules:
 - rm -rf, curl | sh, base64 -d | sh and equivalent command execution
   patterns should be denied.
 - Potential data exfiltration should be denied.
+
+The deterministic policy and Agent capabilities are authoritative.
+Never assume an LLM can grant an Agent a missing capability.
 """
 
 
@@ -84,11 +99,13 @@ Rules:
 # Judge client
 # ============================================================
 
-
 def _create_judge_client() -> genai.Client:
+    """
+    Create the provider client only when the probabilistic judge
+    is actually required.
+    """
 
     if not settings.JUDGE_KEY:
-
         raise RuntimeError(
             "JUDGE_KEY is not configured"
         )
@@ -99,9 +116,156 @@ def _create_judge_client() -> genai.Client:
 
 
 # ============================================================
-# Main pipeline
+# Decision-engine action construction
 # ============================================================
 
+def _build_security_action(
+    *,
+    normalized_call: NormalizedToolCall,
+    policy_version: str,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    trace_id: str | None,
+) -> SecurityAction:
+    """
+    Construct the canonical action presented to the Security Decision
+    Engine.
+
+    The fingerprint is based on the effective normalized action rather
+    than provider-specific wrapper data.
+    """
+
+    required = required_capabilities_for_operation(
+        normalized_call.op
+    )
+
+    return SecurityAction(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        trace_id=trace_id or "",
+        tool_name=normalized_call.tool_name,
+        operation=normalized_call.op,
+        target=normalized_call.target,
+        arguments=normalized_call.args_normalized,
+        capabilities=[
+            capability.value
+            for capability in required
+        ],
+        policy_version=policy_version,
+        provenance={
+            "source": "judge_pipeline",
+            "normalization": "deterministic",
+        },
+    )
+
+
+async def _authorize_with_decision_engine(
+    *,
+    action: SecurityAction,
+) -> dict | None:
+    """
+    Ask the persisted Security Decision Engine whether the Agent identity
+    is permitted to reach the next stage.
+
+    Returns None when authorization succeeds.
+
+    Returns a structured denial when the security kernel blocks the action.
+    """
+
+    async with async_session() as session:
+
+        engine = SecurityDecisionEngine(
+            session
+        )
+
+        result = await engine.authorize(
+            action
+        )
+
+        if result.decision == (
+            SecurityDecision.ALLOW
+        ):
+            return None
+
+        await _log(
+            action.tenant_id,
+            action.trace_id,
+            "privilege_escalation",
+            "blocked",
+            result.reason,
+        )
+
+        return {
+            "decision": result.decision.value,
+            "reason": result.reason,
+            "category": (
+                "privilege_escalation"
+            ),
+            "missing_capabilities": (
+                result.missing_capabilities
+            ),
+            "action_fingerprint": (
+                result.action_fingerprint
+            ),
+        }
+
+
+async def _request_human_approval(
+    *,
+    action: SecurityAction,
+) -> dict:
+    """
+    Persist an approval request for a policy `step_up` result.
+
+    The request is committed before the result is returned, so the
+    approval_id is durable and can safely be handed to a separate
+    human-control-plane request.
+    """
+
+    async with async_session() as session:
+
+        engine = SecurityDecisionEngine(
+            session
+        )
+
+        result = await engine.authorize(
+            action,
+            require_human_approval=True,
+        )
+
+        await session.commit()
+
+        await _log(
+            action.tenant_id,
+            action.trace_id,
+            "privilege_escalation",
+            "step_up_approval",
+            result.reason,
+        )
+
+        return {
+            "decision": result.decision.value,
+            "reason": result.reason,
+            "category": (
+                "privilege_escalation"
+            ),
+            "policy_version": (
+                action.policy_version
+            ),
+            "approval_id": (
+                str(result.approval_id)
+                if result.approval_id
+                else None
+            ),
+            "action_fingerprint": (
+                result.action_fingerprint
+            ),
+        }
+
+
+# ============================================================
+# Main pipeline
+# ============================================================
 
 async def execute_tool_with_judge(
     raw_tool_call: dict,
@@ -110,7 +274,28 @@ async def execute_tool_with_judge(
     tenant_id: uuid.UUID,
     trace_id: str | None = None,
     agent_scopes: Iterable[str] | None = None,
+    agent_id: uuid.UUID | None = None,
 ) -> dict:
+    """
+    Full runtime security pipeline.
+
+    When `agent_id` is supplied:
+
+        normalize
+          ->
+        Security Decision Engine
+          ->
+        policy
+          ->
+        judge
+
+    The database Agent record is authoritative for identity and
+    capability checks.
+
+    When `agent_id` is omitted, the established compatibility path
+    continues to use the supplied `agent_scopes`. This preserves older
+    callers while the HTTP runtime is migrated in a later batch.
+    """
 
     scopes = list(
         agent_scopes or []
@@ -125,7 +310,6 @@ async def execute_tool_with_judge(
     )
 
     try:
-
         normalized_call = (
             NormalizedToolCall(
                 **normalized
@@ -146,14 +330,10 @@ async def execute_tool_with_judge(
         )
 
         return {
-            "decision":
-                "deny",
-            "reason":
-                "normalization_rejected",
-            "category":
-                "other",
-            "policy_version":
-                policy_version,
+            "decision": "deny",
+            "reason": "normalization_rejected",
+            "category": "other",
+            "policy_version": policy_version,
         }
 
     # ========================================================
@@ -171,63 +351,85 @@ async def execute_tool_with_judge(
         )
 
         return {
-            "decision":
-                "deny",
-            "reason":
-                "unknown_tool_operation",
-            "category":
-                "other",
-            "policy_version":
-                policy_version,
+            "decision": "deny",
+            "reason": "unknown_tool_operation",
+            "category": "other",
+            "policy_version": policy_version,
         }
 
     # ========================================================
-    # Layer 3 — capability authorization
+    # Layer 3 — Security Decision Engine
     # ========================================================
 
-    required = (
-        required_capabilities_for_operation(
-            normalized_call.op
-        )
-    )
+    if agent_id is not None:
 
-    missing = missing_capabilities(
-        scopes,
-        required,
-    )
-
-    if missing:
-
-        reason = (
-            "missing_capabilities:"
-            + ",".join(missing)
+        action = _build_security_action(
+            normalized_call=normalized_call,
+            policy_version=policy_version,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            trace_id=trace_id,
         )
 
-        await _log(
-            tenant_id,
-            trace_id,
-            "privilege_escalation",
-            "blocked",
-            reason,
+        decision_result = (
+            await _authorize_with_decision_engine(
+                action=action
+            )
         )
 
-        return {
-            "decision":
-                "deny",
-            "reason":
-                reason,
-            "category":
+        if decision_result is not None:
+
+            decision_result[
+                "policy_version"
+            ] = policy_version
+
+            return decision_result
+
+    else:
+
+        # ----------------------------------------------------
+        # Compatibility capability path
+        # ----------------------------------------------------
+
+        required = (
+            required_capabilities_for_operation(
+                normalized_call.op
+            )
+        )
+
+        missing = missing_capabilities(
+            scopes,
+            required,
+        )
+
+        if missing:
+
+            reason = (
+                "missing_capabilities:"
+                + ",".join(missing)
+            )
+
+            await _log(
+                tenant_id,
+                trace_id,
                 "privilege_escalation",
-            "missing_capabilities":
-                missing,
-            "required_capabilities":
-                [
+                "blocked",
+                reason,
+            )
+
+            return {
+                "decision": "deny",
+                "reason": reason,
+                "category": (
+                    "privilege_escalation"
+                ),
+                "missing_capabilities": missing,
+                "required_capabilities": [
                     capability.value
                     for capability in required
                 ],
-            "policy_version":
-                policy_version,
-        }
+                "policy_version": policy_version,
+            }
 
     # ========================================================
     # Layer 4 — deterministic policy
@@ -249,17 +451,35 @@ async def execute_tool_with_judge(
         )
 
         return {
-            "decision":
-                "deny",
-            "reason":
-                policy_verdict.reason,
-            "category":
-                "other",
-            "policy_version":
-                policy_version,
+            "decision": "deny",
+            "reason": policy_verdict.reason,
+            "category": "other",
+            "policy_version": policy_version,
         }
 
     if policy_verdict.decision == "step_up":
+
+        # ----------------------------------------------------
+        # New engine path
+        # ----------------------------------------------------
+
+        if agent_id is not None:
+
+            action = _build_security_action(
+                normalized_call=normalized_call,
+                policy_version=policy_version,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                trace_id=trace_id,
+            )
+
+            return await _request_human_approval(
+                action=action
+            )
+
+        # ----------------------------------------------------
+        # Compatibility path
+        # ----------------------------------------------------
 
         await _log(
             tenant_id,
@@ -270,14 +490,12 @@ async def execute_tool_with_judge(
         )
 
         return {
-            "decision":
-                "step_up",
-            "reason":
-                policy_verdict.reason,
-            "category":
-                "privilege_escalation",
-            "policy_version":
-                policy_version,
+            "decision": "step_up",
+            "reason": policy_verdict.reason,
+            "category": (
+                "privilege_escalation"
+            ),
+            "policy_version": policy_version,
         }
 
     # ========================================================
@@ -303,16 +521,11 @@ async def execute_tool_with_judge(
         )
 
         return {
-            "decision":
-                "allow",
-            "risk":
-                0.0,
-            "reason":
-                reason,
-            "category":
-                "benign",
-            "policy_version":
-                policy_version,
+            "decision": "allow",
+            "risk": 0.0,
+            "reason": reason,
+            "category": "benign",
+            "policy_version": policy_version,
         }
 
     # ========================================================
@@ -347,11 +560,11 @@ async def execute_tool_with_judge(
                 ensure_ascii=False,
             ),
             config=types.GenerateContentConfig(
-                system_instruction=
-                    JUDGE_SYSTEM,
+                system_instruction=JUDGE_SYSTEM,
                 temperature=0,
-                response_mime_type=
-                    "application/json",
+                response_mime_type=(
+                    "application/json"
+                ),
             ),
         )
 
@@ -367,8 +580,7 @@ async def execute_tool_with_judge(
             **parsed
         )
 
-        # Prevent a judge from silently switching
-        # to a different policy version.
+        # The supplied runtime policy version is authoritative.
         verdict.policy_version = (
             policy_version
         )
@@ -383,8 +595,9 @@ async def execute_tool_with_judge(
                 "judge_failure_failclosed:"
                 f"{str(exc)[:100]}"
             ),
-            policy_version=
-                policy_version,
+            policy_version=(
+                policy_version
+            ),
         )
 
     # ========================================================
@@ -406,23 +619,17 @@ async def execute_tool_with_judge(
     )
 
     return {
-        "decision":
-            verdict.decision,
-        "reason":
-            verdict.reason,
-        "risk":
-            verdict.risk,
-        "category":
-            verdict.category,
-        "policy_version":
-            verdict.policy_version,
+        "decision": verdict.decision,
+        "reason": verdict.reason,
+        "risk": verdict.risk,
+        "category": verdict.category,
+        "policy_version": verdict.policy_version,
     }
 
 
 # ============================================================
 # Audit
 # ============================================================
-
 
 async def _log(
     tenant_id: uuid.UUID,
@@ -431,6 +638,12 @@ async def _log(
     action_taken: str,
     reason: str,
 ) -> None:
+    """
+    Write to the hash-chained audit log.
+
+    Audit is currently best-effort. The Evidence/Audit phase will later
+    make audit integrity itself a stronger runtime invariant.
+    """
 
     try:
 
@@ -440,16 +653,16 @@ async def _log(
                 session=session,
                 tenant_id=tenant_id,
                 request_id=trace_id,
-                threat_category=
-                    threat_category,
-                action_taken=
-                    action_taken,
-                evaluator_reasoning=
-                    reason,
+                threat_category=(
+                    threat_category
+                ),
+                action_taken=(
+                    action_taken
+                ),
+                evaluator_reasoning=(
+                    reason
+                ),
             )
 
     except Exception:
-        # The audit layer is best-effort in the current phase.
-        # We will harden this to fail closed with stronger
-        # transactional guarantees in the Evidence/Audit phase.
         pass
