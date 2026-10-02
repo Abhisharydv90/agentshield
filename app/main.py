@@ -86,6 +86,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 
+class RequestBodyTooLargeError(Exception):
+    pass
+
+
 class RequestBodyLimitMiddleware:
     """Reject oversized HTTP bodies before application parsing/PII processing."""
 
@@ -136,10 +140,7 @@ class RequestBodyLimitMiddleware:
             body = message.get("body", b"")
             received += len(body)
             if received > self.limit:
-                done = True
-                return {
-                    "type": "http.disconnect",
-                }
+                raise RequestBodyTooLargeError
 
             if not message.get("more_body", False):
                 done = True
