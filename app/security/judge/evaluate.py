@@ -873,31 +873,20 @@ async def _log(
     action_taken: str,
     reason: str,
 ) -> None:
-    """
-    Write to the hash-chained audit log.
+    """Persist a security decision before the decision is returned.
 
-    Audit is currently best-effort. The Evidence/Audit phase will later
-    make audit integrity itself a stronger runtime invariant.
+    Audit persistence is part of the security boundary. A missing evidence
+    record must not silently become a successful runtime action.
     """
-
     try:
-
         async with async_session() as session:
-
             await write_event(
                 session=session,
                 tenant_id=tenant_id,
                 request_id=trace_id,
-                threat_category=(
-                    threat_category
-                ),
-                action_taken=(
-                    action_taken
-                ),
-                evaluator_reasoning=(
-                    reason
-                ),
+                threat_category=threat_category,
+                action_taken=action_taken,
+                evaluator_reasoning=reason,
             )
-
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError("security_audit_unavailable") from exc
