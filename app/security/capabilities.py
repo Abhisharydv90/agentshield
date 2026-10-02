@@ -1,9 +1,7 @@
 """
 AgentShield capability system.
 
-Capabilities are explicit authorities assigned to an Agent.
-
-This is separate from human RBAC.
+Human and Agent authorization are separate security planes.
 
 Human:
     User -> Role -> Management Permission
@@ -11,25 +9,27 @@ Human:
 Agent:
     API Key -> Agent -> Capability -> Runtime Action
 
-Security principle:
-    Unknown capabilities are rejected.
-    Missing capabilities fail closed.
-    No wildcard capability exists.
+Capabilities are intentionally explicit.
+
+Unknown capabilities fail closed.
+Unknown runtime operations fail closed.
+Wildcard authority is not supported.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from fastapi import HTTPException
 
 
-class Capability(StrEnum):
-    """
-    Controlled AgentShield capability vocabulary.
-    """
+# ============================================================
+# Capability vocabulary
+# ============================================================
 
+
+class Capability(StrEnum):
     AGENT_INVOKE = "agent:invoke"
 
     TOOL_READ = "tool:read"
@@ -56,14 +56,65 @@ CAPABILITY_VALUES = frozenset(
 )
 
 
+# ============================================================
+# Operation -> required capabilities
+# ============================================================
+
+OPERATION_CAPABILITIES: dict[
+    str,
+    tuple[Capability, ...],
+] = {
+    "read": (
+        Capability.TOOL_READ,
+    ),
+
+    "write": (
+        Capability.TOOL_WRITE,
+    ),
+
+    "delete": (
+        Capability.TOOL_DELETE,
+    ),
+
+    "execute": (
+        Capability.TOOL_EXECUTE,
+    ),
+
+    # External actions require both the ability to execute
+    # the tool and permission to make network egress.
+    "external_call": (
+        Capability.TOOL_EXECUTE,
+        Capability.NETWORK_EGRESS,
+    ),
+}
+
+
+def required_capabilities_for_operation(
+    operation: str,
+) -> tuple[Capability, ...]:
+    """
+    Return the capabilities required for a normalized operation.
+
+    Unknown operations intentionally return an empty tuple;
+    callers must separately reject unknown operations.
+    """
+
+    return OPERATION_CAPABILITIES.get(
+        operation,
+        (),
+    )
+
+
+# ============================================================
+# Capability normalization
+# ============================================================
+
+
 def normalize_capabilities(
     values: Iterable[str],
 ) -> list[str]:
     """
-    Validate and normalize a capability list.
-
-    Unknown capability names raise ValueError so the function can
-    be used directly inside Pydantic validators.
+    Validate and deduplicate an Agent capability set.
     """
 
     normalized: list[str] = []
@@ -71,12 +122,15 @@ def normalize_capabilities(
 
     for raw in values:
 
-        value = str(raw).strip()
+        value = str(
+            raw
+        ).strip()
 
         if not value:
             continue
 
         if value not in CAPABILITY_VALUES:
+
             raise ValueError(
                 f"Unknown capability: {value}"
             )
@@ -84,10 +138,79 @@ def normalize_capabilities(
         if value in seen:
             continue
 
-        seen.add(value)
-        normalized.append(value)
+        seen.add(
+            value
+        )
+
+        normalized.append(
+            value
+        )
 
     return normalized
+
+
+# ============================================================
+# Capability lookup
+# ============================================================
+
+
+def missing_capabilities(
+    scopes: Iterable[str],
+    required: Sequence[
+        Capability | str
+    ],
+) -> list[str]:
+    """
+    Return required capabilities that are missing.
+
+    Invalid stored scopes also fail closed by being reported
+    as missing/invalid authority.
+    """
+
+    normalized_scopes = {
+        str(scope).strip()
+        for scope in scopes
+        if str(scope).strip()
+    }
+
+    invalid_scopes = [
+        scope
+        for scope in normalized_scopes
+        if scope not in CAPABILITY_VALUES
+    ]
+
+    if invalid_scopes:
+
+        return sorted(
+            set(invalid_scopes)
+        )
+
+    missing: list[str] = []
+
+    for item in required:
+
+        value = (
+            item.value
+            if isinstance(
+                item,
+                Capability,
+            )
+            else str(item)
+        )
+
+        if value not in CAPABILITY_VALUES:
+
+            missing.append(
+                value
+            )
+
+        elif value not in normalized_scopes:
+
+            missing.append(
+                value
+            )
+
+    return missing
 
 
 def has_capability(
@@ -95,26 +218,32 @@ def has_capability(
     capability: Capability | str,
 ) -> bool:
     """
-    Return True only if the Agent explicitly possesses the
-    requested capability.
+    Check one explicit capability.
     """
 
-    requested = (
+    required = (
         capability.value
         if isinstance(
             capability,
             Capability,
         )
-        else str(capability)
+        else str(
+            capability
+        )
     )
 
-    if requested not in CAPABILITY_VALUES:
+    if required not in CAPABILITY_VALUES:
         return False
 
-    return requested in set(
-        str(scope).strip()
-        for scope in scopes
+    return not missing_capabilities(
+        scopes,
+        [required],
     )
+
+
+# ============================================================
+# Enforcement
+# ============================================================
 
 
 def require_capability(
@@ -122,46 +251,78 @@ def require_capability(
     capability: Capability | str,
 ) -> None:
     """
-    Enforce a capability.
-
-    Invalid stored capability configuration and missing
-    capabilities both fail closed.
+    Raise HTTP 403 unless the requested capability exists.
     """
 
-    scope_values = [
-        str(scope).strip()
-        for scope in scopes
-    ]
-
-    invalid = [
-        scope
-        for scope in scope_values
-        if scope and scope not in CAPABILITY_VALUES
-    ]
-
-    if invalid:
-        raise HTTPException(
-            status_code=403,
-            detail="invalid_capability_configuration",
+    required = (
+        capability.value
+        if isinstance(
+            capability,
+            Capability,
         )
-
-    if not has_capability(
-        scope_values,
-        capability,
-    ):
-        requested = (
-            capability.value
-            if isinstance(
-                capability,
-                Capability,
-            )
-            else str(capability)
+        else str(
+            capability
         )
+    )
+
+    missing = missing_capabilities(
+        scopes,
+        [required],
+    )
+
+    if missing:
 
         raise HTTPException(
             status_code=403,
             detail={
-                "error": "capability_required",
-                "capability": requested,
+                "error":
+                    "capability_required",
+                "capability":
+                    required,
+            },
+        )
+
+
+def require_operation_capabilities(
+    scopes: Iterable[str],
+    operation: str,
+) -> None:
+    """
+    Enforce the complete capability set required by
+    a normalized runtime operation.
+    """
+
+    if operation not in OPERATION_CAPABILITIES:
+
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error":
+                    "unknown_operation",
+                "operation":
+                    operation,
+            },
+        )
+
+    required = required_capabilities_for_operation(
+        operation
+    )
+
+    missing = missing_capabilities(
+        scopes,
+        required,
+    )
+
+    if missing:
+
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error":
+                    "capabilities_required",
+                "operation":
+                    operation,
+                "missing":
+                    missing,
             },
         )

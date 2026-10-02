@@ -1,34 +1,41 @@
 """
 AgentShield runtime proxy.
 
-Runtime authentication model:
+Request path:
 
-    X-API-Key
+    API Key
         ↓
-    APIKey
-        ↓
-    Agent
+    Agent Identity
         ↓
     Agent status
         ↓
-    Capability check
+    agent:invoke
         ↓
-    Injection / PII / policy pipeline
+    inbound security
         ↓
-    Upstream LLM
-
-An API key without a bound Agent cannot invoke the runtime.
-
-An Agent without `agent:invoke` cannot invoke the runtime.
+    upstream LLM
+        ↓
+    proposed tool-call authorization
+        ↓
+    downstream Agent
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Request,
+)
+from fastapi.responses import (
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from sqlalchemy import select, update
 
 from app.config import settings
@@ -40,14 +47,23 @@ from app.policy.dsl import (
     Policy,
     policy_from_db_rules,
 )
-from app.proxy.outbound import process_outbound_stream
+from app.proxy.outbound import (
+    authorize_non_streaming_response,
+    process_outbound_stream,
+)
 from app.security.capabilities import (
     Capability,
     require_capability,
 )
-from app.security.injection.detector import scan_inbound
-from app.security.pii.redactor import get_redactor
-from app.telemetry.audit import write_event
+from app.security.injection.detector import (
+    scan_inbound,
+)
+from app.security.pii.redactor import (
+    get_redactor,
+)
+from app.telemetry.audit import (
+    write_event,
+)
 
 
 router = APIRouter(
@@ -57,7 +73,7 @@ router = APIRouter(
 
 
 # ============================================================
-# Policy loader
+# Policy
 # ============================================================
 
 
@@ -102,7 +118,7 @@ async def _load_active_policy(
 
 
 # ============================================================
-# Agent last-seen update
+# Agent activity
 # ============================================================
 
 
@@ -116,7 +132,9 @@ async def _touch_agent(
         async with async_session() as session:
 
             await session.execute(
-                update(Agent)
+                update(
+                    Agent
+                )
                 .where(
                     Agent.agent_id
                     == agent_id
@@ -140,8 +158,6 @@ async def _touch_agent(
             await session.commit()
 
     except Exception:
-        # Observability metadata must not turn an otherwise
-        # authorized request into an application failure.
         pass
 
 
@@ -174,10 +190,6 @@ async def chat_completions(
             detail="no_tenant",
         )
 
-    # --------------------------------------------------------
-    # Agent identity
-    # --------------------------------------------------------
-
     agent = getattr(
         request.state,
         "agent",
@@ -191,10 +203,6 @@ async def chat_completions(
             detail="agent_identity_required",
         )
 
-    # --------------------------------------------------------
-    # Agent status
-    # --------------------------------------------------------
-
     if agent.status != "active":
 
         raise HTTPException(
@@ -203,7 +211,7 @@ async def chat_completions(
         )
 
     # --------------------------------------------------------
-    # Runtime capability
+    # Agent itself needs permission to invoke the gateway.
     # --------------------------------------------------------
 
     require_capability(
@@ -218,10 +226,13 @@ async def chat_completions(
 
     tenant_id = tenant.tenant_id
     tenant_slug = tenant.slug
+    agent_scopes = list(
+        agent.scopes or []
+    )
 
-    # --------------------------------------------------------
-    # Parse request
-    # --------------------------------------------------------
+    # ========================================================
+    # Request body
+    # ========================================================
 
     try:
 
@@ -244,17 +255,17 @@ async def chat_completions(
             detail="request_body_must_be_object",
         )
 
-    # --------------------------------------------------------
-    # Layer 1: inbound injection
-    # --------------------------------------------------------
+    # ========================================================
+    # Layer 1 — inbound injection
+    # ========================================================
 
-    verdict = await scan_inbound(
+    injection_verdict = await scan_inbound(
         body,
         trace_id,
         tenant_slug,
     )
 
-    if verdict.blocked:
+    if injection_verdict.blocked:
 
         try:
 
@@ -268,7 +279,7 @@ async def chat_completions(
                         "injection_attempt",
                     action_taken="blocked",
                     evaluator_reasoning=
-                        verdict.reason,
+                        injection_verdict.reason,
                 )
 
         except Exception:
@@ -278,15 +289,15 @@ async def chat_completions(
             status_code=403,
             detail={
                 "error":
-                    "Blocked by AgentShield",
+                    "blocked_by_agentshield",
                 "reason":
-                    verdict.reason,
+                    injection_verdict.reason,
             },
         )
 
-    # --------------------------------------------------------
-    # Layer 2: PII redaction
-    # --------------------------------------------------------
+    # ========================================================
+    # Layer 2 — PII
+    # ========================================================
 
     if settings.PII_ENFORCE:
 
@@ -326,9 +337,9 @@ async def chat_completions(
             except Exception:
                 pass
 
-    # --------------------------------------------------------
-    # Layer 3: policy
-    # --------------------------------------------------------
+    # ========================================================
+    # Layer 3 — policy
+    # ========================================================
 
     (
         policy,
@@ -337,9 +348,9 @@ async def chat_completions(
         tenant_id
     )
 
-    # --------------------------------------------------------
-    # Upstream request
-    # --------------------------------------------------------
+    # ========================================================
+    # Upstream
+    # ========================================================
 
     headers = {
         "Authorization":
@@ -349,7 +360,8 @@ async def chat_completions(
     }
 
     client = httpx.AsyncClient(
-        timeout=settings.UPSTREAM_TIMEOUT
+        timeout=
+            settings.UPSTREAM_TIMEOUT
     )
 
     try:
@@ -371,14 +383,14 @@ async def chat_completions(
             )
         )
 
-    except Exception:
+    except Exception as exc:
 
         await client.aclose()
 
         raise HTTPException(
             status_code=502,
             detail="upstream_unavailable",
-        )
+        ) from exc
 
     is_streaming = bool(
         body.get(
@@ -387,44 +399,132 @@ async def chat_completions(
         )
     )
 
-    tools_requested = (
-        "tools" in body
-        or "functions" in body
+    tools_requested = bool(
+        body.get(
+            "tools"
+        )
+        or body.get(
+            "functions"
+        )
     )
 
-    # --------------------------------------------------------
-    # Streaming tool-call path
-    # --------------------------------------------------------
+    # ========================================================
+    # Streaming tool path
+    # ========================================================
 
     if (
         is_streaming
         and tools_requested
     ):
 
+        async def authorized_stream():
+
+            try:
+
+                async for chunk in (
+                    process_outbound_stream(
+                        upstream_iterator=
+                            upstream_resp.aiter_bytes(),
+                        policy=
+                            policy,
+                        policy_version=
+                            policy_version,
+                        trace_id=
+                            trace_id,
+                        tenant_id=
+                            tenant_id,
+                        agent_scopes=
+                            agent_scopes,
+                    )
+                ):
+
+                    yield chunk
+
+            finally:
+
+                await client.aclose()
+
         return StreamingResponse(
-            process_outbound_stream(
-                upstream_iterator=
-                    upstream_resp.aiter_bytes(),
-                policy=policy,
-                policy_version=
-                    policy_version,
-                trace_id=trace_id,
-                tenant_id=tenant_id,
-            ),
+            authorized_stream(),
             media_type=
                 "text/event-stream",
             headers={
                 "X-Trace-Id":
                     trace_id,
+                "Cache-Control":
+                    "no-cache",
             },
         )
 
-    # --------------------------------------------------------
-    # Passthrough path
-    #
-    # Non-streaming tool-call enforcement will be hardened
-    # in the next runtime-security batch.
-    # --------------------------------------------------------
+    # ========================================================
+    # Non-streaming responses
+    # ========================================================
+
+    if not is_streaming:
+
+        try:
+
+            response_body = (
+                await upstream_resp.aread()
+            )
+
+            # Never inspect error responses as tool proposals.
+            if upstream_resp.status_code < 400:
+
+                denial = (
+                    await authorize_non_streaming_response(
+                        body=
+                            response_body,
+                        policy=
+                            policy,
+                        policy_version=
+                            policy_version,
+                        trace_id=
+                            trace_id,
+                        tenant_id=
+                            tenant_id,
+                        agent_scopes=
+                            agent_scopes,
+                    )
+                )
+
+                if denial is not None:
+
+                    return JSONResponse(
+                        status_code=403,
+                        content=denial,
+                    )
+
+            content_type = (
+                upstream_resp.headers.get(
+                    "content-type",
+                    "application/json",
+                )
+            )
+
+            return Response(
+                content=
+                    response_body,
+                status_code=
+                    upstream_resp.status_code,
+                media_type=
+                    content_type.split(
+                        ";",
+                        1,
+                    )[0],
+                headers={
+                    "X-Trace-Id":
+                        trace_id,
+                },
+            )
+
+        finally:
+
+            await client.aclose()
+
+    # ========================================================
+    # Streaming without tools
+    # ========================================================
 
     async def passthrough():
 
@@ -444,7 +544,10 @@ async def chat_completions(
         passthrough(),
         status_code=
             upstream_resp.status_code,
-        headers=dict(
-            upstream_resp.headers
-        ),
+        headers={
+            "X-Trace-Id":
+                trace_id,
+        },
+        media_type=
+            "text/event-stream",
     )
