@@ -127,6 +127,7 @@ def _create_judge_client() -> genai.Client:
 def _build_security_action(
     *,
     normalized_call: NormalizedToolCall,
+    policy: Policy,
     policy_version: str,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
@@ -271,9 +272,10 @@ async def _request_human_approval(
                 if result.approval_id
                 else None
             ),
-            "action_fingerprint": (
-                result.action_fingerprint
-            ),
+            "action_fingerprint": result.action_fingerprint,
+            "policy_hash": result.policy_hash,
+            "capability_snapshot_hash": result.capability_snapshot_hash,
+            "decision_hash": result.decision_hash,
         }
 
 
@@ -513,6 +515,7 @@ async def execute_tool_with_judge(
 
         action = _build_security_action(
             normalized_call=normalized_call,
+            policy=policy,
             policy_version=policy_version,
             tenant_id=tenant_id,
             agent_id=agent_id,
@@ -616,6 +619,7 @@ async def execute_tool_with_judge(
 
             action = _build_security_action(
                 normalized_call=normalized_call,
+                policy=policy,
                 policy_version=policy_version,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
