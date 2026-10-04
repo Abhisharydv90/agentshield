@@ -20,9 +20,6 @@ from app.security.judge.evaluate import execute_tool_with_judge
 from app.security.passwords import hash_password
 
 
-pytestmark = pytest.mark.asyncio
-
-
 def _policy() -> Policy:
     return Policy(
         name="binding-test-policy",
