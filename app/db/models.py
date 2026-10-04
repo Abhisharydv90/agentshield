@@ -375,16 +375,19 @@ class ApprovalRequest(Base):
     policy_hash: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+        index=True,
     )
 
     capability_snapshot_hash: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+        index=True,
     )
 
     decision_hash: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+        index=True,
     )
 
     state: Mapped[str] = mapped_column(
