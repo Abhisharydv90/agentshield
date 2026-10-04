@@ -45,7 +45,7 @@ from app.db.models import Agent, Policy as PolicyModel
 from app.db.session import async_session
 from app.middleware.trace import get_trace_id
 from app.policy.dsl import (
-    EXAMPLE_POLICY,
+    NO_ACTIVE_POLICY,
     Policy,
     policy_from_db_rules,
 )
@@ -102,15 +102,13 @@ async def _load_active_policy(
         ).scalar_one_or_none()
 
     if row is None:
-
-        return (
-            EXAMPLE_POLICY,
-            "fallback",
-        )
+        return NO_ACTIVE_POLICY, NO_ACTIVE_POLICY.version
 
     return (
         policy_from_db_rules(
-            row.rules
+            row.rules,
+            name=row.name,
+            version=row.version,
         ),
         row.version,
     )

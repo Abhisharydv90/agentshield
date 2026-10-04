@@ -22,6 +22,14 @@ class Policy(BaseModel):
     notes: str = ""
 
 
+NO_ACTIVE_POLICY = Policy(
+    name="no-active-policy",
+    version="0",
+    default="deny",
+    rules=[ToolRule(tool_pattern="*", decision="deny")],
+)
+
+
 EXAMPLE_POLICY = Policy(
     name="test-billing-agent",
     version="1.0.0",

@@ -50,6 +50,11 @@ from app.security.decision.contract import (
 from app.security.decision.engine import (
     SecurityDecisionEngine,
 )
+from app.security.evidence.binding import (
+    approval_decision_hash,
+    capability_snapshot_hash,
+    policy_snapshot_hash,
+)
 from app.security.judge.contract import (
     JudgeVerdict,
     NormalizedToolCall,
@@ -126,6 +131,7 @@ def _build_security_action(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     trace_id: str | None,
+    agent_scopes: Iterable[str],
 ) -> SecurityAction:
     """
     Construct the canonical action presented to the Security Decision
@@ -152,6 +158,13 @@ def _build_security_action(
             for capability in required
         ],
         policy_version=policy_version,
+        policy_hash=policy_snapshot_hash(policy),
+        capability_snapshot_hash=capability_snapshot_hash(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            status="active",
+            scopes=agent_scopes,
+        ),
         provenance={
             "source": "judge_pipeline",
             "normalization": "deterministic",
@@ -204,9 +217,10 @@ async def _authorize_with_decision_engine(
             "missing_capabilities": (
                 result.missing_capabilities
             ),
-            "action_fingerprint": (
-                result.action_fingerprint
-            ),
+            "action_fingerprint": result.action_fingerprint,
+            "policy_hash": result.policy_hash,
+            "capability_snapshot_hash": result.capability_snapshot_hash,
+            "decision_hash": result.decision_hash,
         }
 
 
@@ -308,6 +322,8 @@ def _action_with_approval_trace(
         capabilities=action.capabilities,
         policy_version=action.policy_version,
         provenance=action.provenance,
+        policy_hash=action.policy_hash,
+        capability_snapshot_hash=action.capability_snapshot_hash,
     )
 
 
@@ -356,11 +372,20 @@ async def _consume_approval(
         )
         expected_fingerprint = expected_action.fingerprint()
 
+        expected_decision_hash = approval_decision_hash(
+            action_fingerprint=expected_fingerprint,
+            policy_hash=expected_action.policy_hash,
+            capability_snapshot_hash=expected_action.capability_snapshot_hash,
+        )
+
         try:
             consumed = await engine.consume(
                 approval_id=parsed_id,
                 tenant_id=action.tenant_id,
                 expected_action_fingerprint=expected_fingerprint,
+                expected_policy_hash=expected_action.policy_hash,
+                expected_capability_snapshot_hash=expected_action.capability_snapshot_hash,
+                expected_decision_hash=expected_decision_hash,
             )
             await session.commit()
         except ValueError as exc:
@@ -378,6 +403,9 @@ async def _consume_approval(
             "_consumed": True,
             "approval_id": str(consumed.approval_id),
             "action_fingerprint": consumed.action_fingerprint,
+            "policy_hash": consumed.policy_hash,
+            "capability_snapshot_hash": consumed.capability_snapshot_hash,
+            "decision_hash": consumed.decision_hash,
         }
 
 
@@ -489,6 +517,7 @@ async def execute_tool_with_judge(
             tenant_id=tenant_id,
             agent_id=agent_id,
             trace_id=trace_id,
+            agent_scopes=scopes,
         )
 
         decision_result = (
@@ -591,6 +620,7 @@ async def execute_tool_with_judge(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 trace_id=trace_id,
+                agent_scopes=scopes,
             )
 
             if approval_id is not None:

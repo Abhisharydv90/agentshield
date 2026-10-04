@@ -50,6 +50,9 @@ class ApprovalSummary(BaseModel):
     trace_id: str
     action_fingerprint: str
     policy_version: str
+    policy_hash: str
+    capability_snapshot_hash: str
+    decision_hash: str
     state: str
     requested_at: datetime
     expires_at: datetime
@@ -152,6 +155,9 @@ def _summary(
         trace_id=approval.trace_id,
         action_fingerprint=approval.action_fingerprint,
         policy_version=approval.policy_version,
+        policy_hash=approval.policy_hash,
+        capability_snapshot_hash=approval.capability_snapshot_hash,
+        decision_hash=approval.decision_hash,
         state=approval.state,
         requested_at=approval.requested_at,
         expires_at=approval.expires_at,

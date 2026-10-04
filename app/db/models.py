@@ -372,6 +372,21 @@ class ApprovalRequest(Base):
         nullable=False,
     )
 
+    policy_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    capability_snapshot_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    decision_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
     state: Mapped[str] = mapped_column(
         String(20),
         nullable=False,

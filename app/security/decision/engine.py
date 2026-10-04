@@ -35,6 +35,12 @@ from app.security.decision.contract import (
     SecurityDecision,
     utc_now,
 )
+from app.security.evidence.binding import (
+    UNBOUND_HASH,
+    approval_decision_hash,
+    capability_snapshot_hash,
+    decision_snapshot_hash,
+)
 
 
 _SENSITIVE_KEY_MARKERS = (
@@ -89,15 +95,19 @@ class DecisionResult:
         action_fingerprint: str,
         approval_id: uuid.UUID | None = None,
         missing_capabilities: list[str] | None = None,
+        policy_hash: str = UNBOUND_HASH,
+        capability_snapshot_hash: str = UNBOUND_HASH,
+        decision_hash: str = UNBOUND_HASH,
     ) -> None:
 
         self.decision = decision
         self.reason = reason
         self.action_fingerprint = action_fingerprint
         self.approval_id = approval_id
-        self.missing_capabilities = (
-            missing_capabilities or []
-        )
+        self.missing_capabilities = missing_capabilities or []
+        self.policy_hash = policy_hash
+        self.capability_snapshot_hash = capability_snapshot_hash
+        self.decision_hash = decision_hash
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,9 +121,10 @@ class DecisionResult:
                 if self.approval_id
                 else None
             ),
-            "missing_capabilities": (
-                self.missing_capabilities
-            ),
+            "missing_capabilities": self.missing_capabilities,
+            "policy_hash": self.policy_hash,
+            "capability_snapshot_hash": self.capability_snapshot_hash,
+            "decision_hash": self.decision_hash,
         }
 
 
@@ -194,17 +205,48 @@ class SecurityDecisionEngine:
 
         fingerprint = action.fingerprint()
 
-        agent = await self._load_agent(
-            action
-        )
+        def build_result(
+            decision: SecurityDecision,
+            reason: str,
+            *,
+            missing: list[str] | None = None,
+            approval_id: uuid.UUID | None = None,
+        ) -> DecisionResult:
+            return DecisionResult(
+                decision=decision,
+                reason=reason,
+                action_fingerprint=fingerprint,
+                approval_id=approval_id,
+                missing_capabilities=missing,
+                policy_hash=action.policy_hash,
+                capability_snapshot_hash=action.capability_snapshot_hash,
+                decision_hash=decision_snapshot_hash(
+                    action_fingerprint=fingerprint,
+                    policy_hash=action.policy_hash,
+                    capability_snapshot_hash=action.capability_snapshot_hash,
+                    decision=decision.value,
+                    reason=reason,
+                    missing_capabilities=missing or [],
+                ),
+            )
+
+        agent = await self._load_agent(action)
 
         if not self._agent_is_usable(agent):
+            return build_result(SecurityDecision.DENY, "agent_unavailable")
 
-            return DecisionResult(
-                decision=SecurityDecision.DENY,
-                reason="agent_unavailable",
-                action_fingerprint=fingerprint,
+        if action.capability_snapshot_hash != UNBOUND_HASH:
+            expected_capability_hash = capability_snapshot_hash(
+                tenant_id=agent.tenant_id,
+                agent_id=agent.agent_id,
+                status=agent.status,
+                scopes=agent.scopes or [],
             )
+            if action.capability_snapshot_hash != expected_capability_hash:
+                return build_result(
+                    SecurityDecision.DENY,
+                    "capability_snapshot_mismatch",
+                )
 
         required = (
             required_capabilities_for_operation(
@@ -220,11 +262,7 @@ class SecurityDecisionEngine:
             "external_call",
         }:
 
-            return DecisionResult(
-                decision=SecurityDecision.DENY,
-                reason="unknown_operation",
-                action_fingerprint=fingerprint,
-            )
+            return build_result(SecurityDecision.DENY, "unknown_operation")
 
         missing = missing_capabilities(
             agent.scopes,
@@ -233,22 +271,17 @@ class SecurityDecisionEngine:
 
         if missing:
 
-            return DecisionResult(
-                decision=SecurityDecision.DENY,
-                reason=(
-                    "missing_capabilities:"
-                    + ",".join(missing)
-                ),
-                action_fingerprint=fingerprint,
-                missing_capabilities=missing,
+            return build_result(
+                SecurityDecision.DENY,
+                "missing_capabilities:" + ",".join(missing),
+                missing=missing,
             )
 
         if quarantine:
 
-            return DecisionResult(
-                decision=SecurityDecision.QUARANTINE,
-                reason="quarantine_requested",
-                action_fingerprint=fingerprint,
+            return build_result(
+                SecurityDecision.QUARANTINE,
+                "quarantine_requested",
             )
 
         if require_human_approval:
@@ -259,21 +292,23 @@ class SecurityDecisionEngine:
                 )
             )
 
+            approval_decision = SecurityDecision.APPROVAL_REQUIRED
+            approval_reason = "human_approval_required"
             return DecisionResult(
-                decision=(
-                    SecurityDecision
-                    .APPROVAL_REQUIRED
-                ),
-                reason="human_approval_required",
+                decision=approval_decision,
+                reason=approval_reason,
                 action_fingerprint=fingerprint,
                 approval_id=approval.approval_id,
+                policy_hash=action.policy_hash,
+                capability_snapshot_hash=action.capability_snapshot_hash,
+                decision_hash=approval_decision_hash(
+                    action_fingerprint=fingerprint,
+                    policy_hash=action.policy_hash,
+                    capability_snapshot_hash=action.capability_snapshot_hash,
+                ),
             )
 
-        return DecisionResult(
-            decision=SecurityDecision.ALLOW,
-            reason="capability_authorized",
-            action_fingerprint=fingerprint,
-        )
+        return build_result(SecurityDecision.ALLOW, "capability_authorized")
 
     # --------------------------------------------------------
     # Approval creation
@@ -300,8 +335,13 @@ class SecurityDecisionEngine:
             action_payload=_redact_approval_payload(
                 action.to_dict()
             ),
-            policy_version=(
-                action.policy_version
+            policy_version=action.policy_version,
+            policy_hash=action.policy_hash,
+            capability_snapshot_hash=action.capability_snapshot_hash,
+            decision_hash=approval_decision_hash(
+                action_fingerprint=action.fingerprint(),
+                policy_hash=action.policy_hash,
+                capability_snapshot_hash=action.capability_snapshot_hash,
             ),
             state=ApprovalState.PENDING.value,
             requested_at=now,
@@ -445,6 +485,9 @@ class SecurityDecisionEngine:
         approval_id: uuid.UUID,
         tenant_id: uuid.UUID,
         expected_action_fingerprint: str,
+        expected_policy_hash: str = UNBOUND_HASH,
+        expected_capability_snapshot_hash: str = UNBOUND_HASH,
+        expected_decision_hash: str = UNBOUND_HASH,
     ) -> ApprovalRequest:
 
         now = utc_now()
@@ -471,12 +514,20 @@ class SecurityDecisionEngine:
                 "approval_not_found"
             )
 
-        if approval.action_fingerprint != (
-            expected_action_fingerprint
+        if approval.action_fingerprint != expected_action_fingerprint:
+            raise ValueError("approval_action_mismatch")
+
+        if expected_policy_hash != UNBOUND_HASH and approval.policy_hash != expected_policy_hash:
+            raise ValueError("approval_policy_mismatch")
+
+        if (
+            expected_capability_snapshot_hash != UNBOUND_HASH
+            and approval.capability_snapshot_hash != expected_capability_snapshot_hash
         ):
-            raise ValueError(
-                "approval_action_mismatch"
-            )
+            raise ValueError("approval_capability_mismatch")
+
+        if expected_decision_hash != UNBOUND_HASH and approval.decision_hash != expected_decision_hash:
+            raise ValueError("approval_decision_mismatch")
 
         if approval.state != (
             ApprovalState.APPROVED.value

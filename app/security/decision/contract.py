@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
+from app.security.evidence.binding import UNBOUND_HASH
+
 
 # ============================================================
 # Decisions
@@ -129,6 +131,8 @@ class SecurityAction:
         capabilities: list[str] | None = None,
         policy_version: str = "unknown",
         provenance: dict[str, Any] | None = None,
+        policy_hash: str = UNBOUND_HASH,
+        capability_snapshot_hash: str = UNBOUND_HASH,
     ) -> None:
 
         self.tenant_id = tenant_id
@@ -143,6 +147,8 @@ class SecurityAction:
         )
         self.policy_version = policy_version
         self.provenance = provenance or {}
+        self.policy_hash = policy_hash
+        self.capability_snapshot_hash = capability_snapshot_hash
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -163,6 +169,8 @@ class SecurityAction:
             "arguments": self.arguments,
             "capabilities": self.capabilities,
             "policy_version": self.policy_version,
+            "policy_hash": self.policy_hash,
+            "capability_snapshot_hash": self.capability_snapshot_hash,
             "provenance": self.provenance,
         }
 
