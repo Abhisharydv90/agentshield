@@ -36,6 +36,7 @@ from tenacity import (
 )
 
 from app.config import settings
+from app.db.models import Agent
 from app.db.session import async_session
 from app.policy.dsl import Policy
 from app.policy.engine import evaluate_policy
@@ -133,6 +134,7 @@ def _build_security_action(
     agent_id: uuid.UUID,
     trace_id: str | None,
     agent_scopes: Iterable[str],
+    agent_status: str = "active",
 ) -> SecurityAction:
     """
     Construct the canonical action presented to the Security Decision
@@ -163,7 +165,7 @@ def _build_security_action(
         capability_snapshot_hash=capability_snapshot_hash(
             tenant_id=tenant_id,
             agent_id=agent_id,
-            status="active",
+            status=agent_status,
             scopes=agent_scopes,
         ),
         provenance={
@@ -412,6 +414,23 @@ async def _consume_approval(
 
 
 # ============================================================
+# Authoritative agent snapshot
+# ============================================================
+
+async def _load_agent_snapshot(
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> tuple[list[str], str] | None:
+    """Load the current DB-backed capability state for the action binding."""
+    async with async_session() as session:
+        agent = await session.get(Agent, agent_id)
+        if agent is None or agent.tenant_id != tenant_id:
+            return None
+        return list(agent.scopes or []), str(agent.status)
+
+
+# ============================================================
 # Main pipeline
 # ============================================================
 
@@ -428,7 +447,11 @@ async def execute_tool_with_judge(
     """
     Full runtime security pipeline.
 
-    When `agent_id` is supplied:
+    When `agent_id` is supplied, the runtime capability snapshot is loaded
+    from the database-backed Agent record; supplied `agent_scopes` are not
+    authoritative.
+
+    The pipeline then performs:
 
         normalize
           ->
@@ -438,8 +461,8 @@ async def execute_tool_with_judge(
           ->
         judge
 
-    The database Agent record is authoritative for identity and
-    capability checks.
+    The database Agent record is authoritative for identity, status, and
+    capability binding.
 
     When `agent_id` is omitted, the established compatibility path
     continues to use the supplied `agent_scopes`. This preserves older
@@ -513,6 +536,28 @@ async def execute_tool_with_judge(
 
     if agent_id is not None:
 
+        # The persisted Agent record is authoritative. The caller-supplied
+        # scopes are ignored for the cryptographic runtime snapshot.
+        agent_snapshot = await _load_agent_snapshot(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+        )
+        if agent_snapshot is None:
+            await _log(
+                tenant_id,
+                trace_id,
+                "privilege_escalation",
+                "blocked",
+                "agent_unavailable",
+            )
+            return {
+                "decision": "deny",
+                "reason": "agent_unavailable",
+                "category": "privilege_escalation",
+                "policy_version": policy_version,
+            }
+
+        authoritative_scopes, authoritative_status = agent_snapshot
         action = _build_security_action(
             normalized_call=normalized_call,
             policy=policy,
@@ -520,7 +565,8 @@ async def execute_tool_with_judge(
             tenant_id=tenant_id,
             agent_id=agent_id,
             trace_id=trace_id,
-            agent_scopes=scopes,
+            agent_scopes=authoritative_scopes,
+            agent_status=authoritative_status,
         )
 
         decision_result = (
@@ -617,6 +663,26 @@ async def execute_tool_with_judge(
 
         if agent_id is not None:
 
+            agent_snapshot = await _load_agent_snapshot(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+            )
+            if agent_snapshot is None:
+                await _log(
+                    tenant_id,
+                    trace_id,
+                    "privilege_escalation",
+                    "blocked",
+                    "agent_unavailable",
+                )
+                return {
+                    "decision": "deny",
+                    "reason": "agent_unavailable",
+                    "category": "privilege_escalation",
+                    "policy_version": policy_version,
+                }
+
+            authoritative_scopes, authoritative_status = agent_snapshot
             action = _build_security_action(
                 normalized_call=normalized_call,
                 policy=policy,
@@ -624,7 +690,8 @@ async def execute_tool_with_judge(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 trace_id=trace_id,
-                agent_scopes=scopes,
+                agent_scopes=authoritative_scopes,
+                agent_status=authoritative_status,
             )
 
             if approval_id is not None:
