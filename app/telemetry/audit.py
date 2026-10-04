@@ -8,6 +8,8 @@ Security properties:
 - Concurrent writes therefore cannot fork the chain.
 - Canonical hashing is preserved for compatibility with existing records.
 - Verification recomputes both links and record hashes.
+- 7F-3 creates a corresponding EvidenceNode in the same transaction as each
+  SecurityEvent, so audit persistence and evidence persistence are atomic.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import SecurityEvent
+from app.security.evidence.runtime import record_runtime_evidence
 
 
 # ============================================================
@@ -187,6 +190,9 @@ async def write_event(
 
     A transaction-scoped advisory lock prevents two concurrent
     writers from reading the same previous hash.
+
+    The SecurityEvent and its EvidenceNode are committed together. If
+    evidence creation fails, neither record is committed.
     """
 
     # --------------------------------------------------------
@@ -263,10 +269,11 @@ async def write_event(
     )
 
     # --------------------------------------------------------
-    # Persist
+    # Persist audit event
     # --------------------------------------------------------
 
     event = SecurityEvent(
+        event_id=uuid.uuid4(),
         tenant_id=tenant_id,
         request_id=request_id,
         timestamp=timestamp,
@@ -284,7 +291,29 @@ async def write_event(
         event
     )
 
-    await session.commit()
+    # Flush first so the explicit event_id and FK target are materialized
+    # before the EvidenceNode is added.
+    await session.flush()
+
+    # --------------------------------------------------------
+    # 7F-3 runtime evidence
+    # --------------------------------------------------------
+
+    record_runtime_evidence(
+        session=session,
+        event=event,
+        payload=payload,
+    )
+
+    # --------------------------------------------------------
+    # Atomic commit
+    # --------------------------------------------------------
+
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
 
     await session.refresh(
         event
