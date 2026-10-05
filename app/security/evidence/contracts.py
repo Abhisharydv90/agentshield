@@ -1,10 +1,13 @@
 """
-Stable Evidence Graph contracts.
-
-These Pydantic models define the externally visible evidence API shape.
+Stable Evidence Fabric API contracts.
 
 Privacy rule:
-    evaluator_reasoning is NEVER part of EvidenceNodeResponse.
+    evaluator_reasoning is never exposed by Evidence Fabric APIs.
+
+Phase 8 additions:
+    trace reconstruction
+    forensic replay
+    compliance evidence reporting
 """
 
 from __future__ import annotations
@@ -13,6 +16,11 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+# ============================================================
+# Core evidence
+# ============================================================
 
 
 class EvidenceNodeResponse(BaseModel):
@@ -51,6 +59,11 @@ class EvidenceGraphResponse(BaseModel):
     truncated: bool
 
 
+# ============================================================
+# Verification
+# ============================================================
+
+
 class EvidenceIssueResponse(BaseModel):
     code: str
     detail: str
@@ -68,18 +81,161 @@ class EvidenceVerificationResponse(BaseModel):
     verified_at: str
 
 
+# ============================================================
+# Summary
+# ============================================================
+
+
 class EvidenceSummaryResponse(BaseModel):
     tenant: str
     node_count: int
     edge_count: int
 
 
-class EvidenceExportResponse(BaseModel):
-    schema_version: str = Field(default="7.0")
-    exported_at: str
-    tenant: str
+# ============================================================
+# Trace reconstruction
+# ============================================================
+
+
+class EvidenceTraceRecordResponse(BaseModel):
+    sequence: int
+
+    event_id: UUID
+
+    evidence_id: UUID | None
+
+    timestamp: str
+
+    request_id: str | None
+
+    threat_category: str
+
+    action_taken: str
+
+    record_hash: str
+
+    prev_hash: str | None
+
+    artifact_hash: str | None
+
+    node_type: str | None
+
+    source: str | None
+
+    metadata_redacted: dict[str, Any]
+
+    record_hash_valid: bool
+
+    evidence_hash_valid: bool
+
+    predecessor_evidence_id: UUID | None
+
+    predecessor_relation: str | None
+
+
+class EvidenceTraceIntegrityResponse(BaseModel):
+    status: str
+
+    events_checked: int
+
+    evidence_checked: int
+
+    missing_evidence: int
+
+
+class EvidenceTraceResponse(BaseModel):
+    trace_id: str
+
+    event_count: int
+
+    node_count: int
+
+    edge_count: int
+
+    start_time: str | None
+
+    end_time: str | None
+
     truncated: bool
+
+    integrity: EvidenceTraceIntegrityResponse
+
+    records: list[EvidenceTraceRecordResponse]
+
+
+# ============================================================
+# Forensic replay
+# ============================================================
+
+
+class EvidenceReplayResponse(BaseModel):
+    trace_id: str
+
+    mode: str = Field(
+        default="forensic"
+    )
+
+    executed: bool = Field(
+        default=False
+    )
+
+    mutations_performed: bool = Field(
+        default=False
+    )
+
+    generated_at: str
+
+    truncated: bool
+
+    records: list[EvidenceTraceRecordResponse]
+
+
+# ============================================================
+# Compliance evidence package
+# ============================================================
+
+
+class EvidenceExportResponse(BaseModel):
+    schema_version: str = Field(
+        default="8.0"
+    )
+
+    package_hash: str
+
+    exported_at: str
+
+    tenant: str
+
+    truncated: bool
+
     verification: EvidenceVerificationResponse
+
     nodes: list[EvidenceNodeResponse]
+
     edges: list[EvidenceEdgeResponse]
+
     privacy: dict[str, str]
+
+
+class EvidenceComplianceReportResponse(BaseModel):
+    schema_version: str = Field(
+        default="8.0"
+    )
+
+    report_id: UUID
+
+    generated_at: str
+
+    tenant: str
+
+    package_hash: str
+
+    node_count: int
+
+    edge_count: int
+
+    truncated: bool
+
+    verification: EvidenceVerificationResponse
+
+    controls: dict[str, str]
