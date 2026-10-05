@@ -38,18 +38,19 @@ export default function EvidencePage() {
     useState<EvidenceNode | null>(null);
 
   const [graph, setGraph] =
-    useState<{
-      nodes: EvidenceNode[];
-      edges: {
-        edge_id: string;
-        tenant_id: string;
-        trace_id: string;
-        from_evidence_id: string;
-        to_evidence_id: string;
-        relation: string;
-        created_at: string;
-      }[];
-    } | null>(null);
+  useState<{
+    nodes: EvidenceNode[];
+    edges: {
+      edge_id: string;
+      tenant_id: string;
+      trace_id: string;
+      from_evidence_id: string;
+      to_evidence_id: string;
+      relation: string;
+      created_at: string;
+    }[];
+    truncated: boolean;
+  } | null>(null);
 
   const [verification, setVerification] =
     useState<EvidenceVerification | null>(
@@ -102,6 +103,7 @@ export default function EvidencePage() {
           setGraph({
             nodes: graphData.nodes,
             edges: graphData.edges,
+            truncated: graphData.truncated,
           });
         }
       } catch (err) {
@@ -148,6 +150,7 @@ export default function EvidencePage() {
       setGraph({
         nodes: graphData.nodes,
         edges: graphData.edges,
+        truncated: graphData.truncated,
       });
     } catch (err) {
       setError(
@@ -475,9 +478,10 @@ export default function EvidencePage() {
 
           <div className="space-y-5">
             {graph && (
-              <EvidenceGraph
-                nodes={graph.nodes}
-                edges={graph.edges}
+                 <EvidenceGraph
+                    nodes={graph.nodes}
+                    edges={graph.edges}
+                    truncated={graph.truncated}
                 selectedId={
                   selected?.evidence_id
                 }

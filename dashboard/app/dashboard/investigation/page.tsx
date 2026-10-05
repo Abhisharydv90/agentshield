@@ -264,6 +264,7 @@ export default function InvestigationPage() {
             <EvidenceGraph
               nodes={graph.nodes}
               edges={graph.edges}
+              truncated={graph.truncated}
               selectedId={
                 selected?.evidence_id
               }
