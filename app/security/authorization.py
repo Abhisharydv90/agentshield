@@ -37,6 +37,7 @@ class Role(StrEnum):
 # Management permissions
 # ============================================================
 
+
 PERMISSIONS: dict[str, set[Role]] = {
     # --------------------------------------------------------
     # Tenant
@@ -140,8 +141,6 @@ PERMISSIONS: dict[str, set[Role]] = {
     # --------------------------------------------------------
     # Human approval control plane
     # --------------------------------------------------------
-    # Approval is a high-impact security operation. Members may not
-    # approve or deny runtime actions in the initial control plane.
 
     "tenant.approvals.read": {
         Role.OWNER,
@@ -149,6 +148,29 @@ PERMISSIONS: dict[str, set[Role]] = {
     },
 
     "tenant.approvals.decide": {
+        Role.OWNER,
+        Role.ADMIN,
+    },
+
+    # --------------------------------------------------------
+    # Evidence investigation control plane
+    # --------------------------------------------------------
+    #
+    # Reading evidence is available to all tenant users.
+    # Verification and compliance export are elevated operations.
+
+    "tenant.evidence.read": {
+        Role.OWNER,
+        Role.ADMIN,
+        Role.MEMBER,
+    },
+
+    "tenant.evidence.verify": {
+        Role.OWNER,
+        Role.ADMIN,
+    },
+
+    "tenant.evidence.export": {
         Role.OWNER,
         Role.ADMIN,
     },
@@ -195,7 +217,9 @@ def can(
     Unknown permissions intentionally return False.
     """
 
-    normalized_role = normalize_role(role)
+    normalized_role = normalize_role(
+        role
+    )
 
     allowed_roles = PERMISSIONS.get(
         permission
