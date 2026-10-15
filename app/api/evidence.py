@@ -122,16 +122,34 @@ def _require_evidence_access(
         None,
     )
 
+    auth_type = getattr(
+        request.state,
+        "auth_type",
+        None,
+    )
+
     if tenant is None:
         raise HTTPException(
             status_code=401,
             detail="no_tenant",
         )
 
-    if user is None:
+    if auth_type != "session" or user is None:
+        raise HTTPException(
+            status_code=403,
+            detail="human_session_required",
+        )
+
+    if user.status != "active" or tenant.status != "active":
         raise HTTPException(
             status_code=401,
-            detail="human_session_required",
+            detail="principal_inactive",
+        )
+
+    if user.tenant_id != tenant.tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="tenant_mismatch",
         )
 
     require_permission(
