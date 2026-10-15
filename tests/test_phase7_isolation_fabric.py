@@ -82,6 +82,19 @@ def test_missing_capability_denies_execution() -> None:
         runner._authorize_request(_context("memory:read"), request)
 
 
+def test_isolation_execution_uses_dedicated_capability() -> None:
+    runner = IsolationRunner()
+    request = IsolationExecutionRequest(
+        command=("python", "-c", "print('ok')"),
+        policy=IsolationPolicy(),
+    )
+
+    runner._authorize_request(_context("isolation:execute"), request)
+
+    with pytest.raises(IsolationDeniedError):
+        runner._authorize_request(_context("tool:execute"), request)
+
+
 def test_policy_fingerprint_is_stable() -> None:
     first = IsolationPolicy().fingerprint()
     second = IsolationPolicy().fingerprint()
