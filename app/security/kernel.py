@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from app.db.models import Agent, AgentIdentity
 from app.security.context import SecurityContext
@@ -65,6 +65,106 @@ class SecurityKernel:
             risk_ceiling=100.0,
         )
 
+    def validate_authority_chain(
+        self,
+        *,
+        token_chain: Sequence[AuthorityToken],
+        target_agent: Agent,
+        issuer_identities: Mapping[uuid.UUID, AgentIdentity],
+        issuer_agents: Mapping[uuid.UUID, Agent],
+        expected_policy_hash: str,
+        trace_id: str,
+        now_epoch: int | None = None,
+    ) -> SecurityContext:
+        """Validate a root-to-leaf authority-token delegation chain.
+
+        The final token must authorize the authenticated target agent. Every
+        delegated hop is signed by the previous token's subject, explicitly
+        references the previous token hash, and is conserved against the
+        parent authority. A root token is self-issued and cannot exceed the
+        issuer agent's configured capability ceiling.
+        """
+
+        if not token_chain:
+            raise AuthorityDeniedError("authority_token_chain_empty")
+
+        now = int(__import__("time").time()) if now_epoch is None else int(now_epoch)
+        previous: AuthorityToken | None = None
+
+        for index, current in enumerate(token_chain):
+            if current.tenant_id != target_agent.tenant_id:
+                raise AuthorityDeniedError("authority_token_tenant_mismatch")
+
+            if current.policy_hash != expected_policy_hash:
+                raise AuthorityDeniedError("authority_token_policy_mismatch")
+
+            issuer = issuer_agents.get(current.issuer_agent_id)
+            identity = issuer_identities.get(current.issuer_agent_id)
+            if issuer is None:
+                raise AuthorityDeniedError("authority_token_issuer_not_found")
+            if issuer.tenant_id != target_agent.tenant_id:
+                raise AuthorityDeniedError("authority_token_issuer_tenant_mismatch")
+            if issuer.status != "active":
+                raise AuthorityDeniedError("authority_token_issuer_inactive")
+            if identity is None:
+                raise AuthorityDeniedError("authority_token_issuer_identity_not_found")
+            if identity.tenant_id != target_agent.tenant_id or identity.agent_id != issuer.agent_id:
+                raise AuthorityDeniedError("authority_token_identity_binding_mismatch")
+            if identity.status != "active":
+                raise AuthorityDeniedError("authority_token_issuer_identity_inactive")
+            if identity.algorithm != current.algorithm:
+                raise AuthorityDeniedError("authority_token_algorithm_mismatch")
+
+            expected_subject = current.subject_agent_id
+            if not current.verify(
+                identity.public_key,
+                expected_tenant_id=target_agent.tenant_id,
+                expected_subject_agent_id=expected_subject,
+                parent_token=previous,
+                now_epoch=now,
+            ):
+                raise AuthorityDeniedError("authority_token_signature_or_chain_invalid")
+
+            if previous is None:
+                if current.issuer_agent_id != current.subject_agent_id:
+                    raise AuthorityDeniedError("authority_token_root_must_be_self_issued")
+                ceiling = self.agent_base_authority(issuer)
+                conservation = self.conservation.compare(
+                    ceiling,
+                    current.authority,
+                )
+                if not conservation.allowed:
+                    raise AuthorityDeniedError("authority_token_exceeds_agent_ceiling")
+            else:
+                if current.issuer_agent_id != previous.subject_agent_id:
+                    raise AuthorityDeniedError("authority_token_issuer_not_parent_subject")
+                if "agent:delegate" not in previous.authority.capabilities:
+                    raise AuthorityDeniedError("parent_authority_cannot_delegate")
+
+                conservation = self.conservation.compare(
+                    previous.authority,
+                    current.authority,
+                )
+                if not conservation.allowed:
+                    raise AuthorityDeniedError(
+                        "authority_token_exceeds_parent_authority"
+                    )
+
+            if current.issued_at > now + 30:
+                raise AuthorityDeniedError("authority_token_not_yet_valid")
+
+            previous = current
+
+        final = token_chain[-1]
+        if final.subject_agent_id != target_agent.agent_id:
+            raise AuthorityDeniedError("authority_token_subject_mismatch")
+
+        return SecurityContext.from_token(
+            token=final,
+            trace_id=trace_id,
+            policy_hash=expected_policy_hash,
+        )
+
     def validate_token_against_agent(
         self,
         *,
@@ -73,36 +173,26 @@ class SecurityKernel:
         agent: Agent,
         expected_policy_hash: str,
         now_epoch: int | None = None,
+        trace_id: str = "",
     ) -> SecurityContext:
-        if token.tenant_id != agent.tenant_id:
-            raise AuthorityDeniedError("authority_token_tenant_mismatch")
-        if token.subject_agent_id != agent.agent_id:
-            raise AuthorityDeniedError("authority_token_subject_mismatch")
-        if token.issuer_agent_id != agent.agent_id:
-            raise AuthorityDeniedError("authority_token_issuer_mismatch")
-        if token.policy_hash != expected_policy_hash:
-            raise AuthorityDeniedError("authority_token_policy_mismatch")
-        if identity.agent_id != agent.agent_id or identity.tenant_id != agent.tenant_id:
-            raise AuthorityDeniedError("identity_binding_mismatch")
-        if identity.algorithm != token.algorithm:
-            raise AuthorityDeniedError("identity_algorithm_mismatch")
-        if not token.verify(
-            identity.public_key,
-            expected_tenant_id=agent.tenant_id,
-            expected_subject_agent_id=agent.agent_id,
+        """Backward-compatible single-token validation.
+
+        Single-token credentials are valid only when self-issued. Delegated
+        credentials must be presented as a full chain so parent authority can
+        be verified and conserved.
+        """
+
+        if token.issuer_agent_id != token.subject_agent_id:
+            raise AuthorityDeniedError("delegated_authority_chain_required")
+
+        return self.validate_authority_chain(
+            token_chain=(token,),
+            target_agent=agent,
+            issuer_identities={identity.agent_id: identity},
+            issuer_agents={agent.agent_id: agent},
+            expected_policy_hash=expected_policy_hash,
+            trace_id=trace_id,
             now_epoch=now_epoch,
-        ):
-            raise AuthorityDeniedError("authority_token_signature_invalid")
-
-        ceiling = self.agent_base_authority(agent)
-        conservation = self.conservation.compare(ceiling, token.authority)
-        if not conservation.allowed:
-            raise AuthorityDeniedError("authority_token_exceeds_agent_ceiling")
-
-        return SecurityContext.from_token(
-            token=token,
-            trace_id="",
-            policy_hash=expected_policy_hash,
         )
 
     def authorize_action(
