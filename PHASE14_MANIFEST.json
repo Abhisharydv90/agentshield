@@ -1,0 +1,73 @@
+{
+  "phase": "14",
+  "name": "Enterprise",
+  "status": "implementation-complete",
+  "umbrella": "AURAGENT",
+  "component": "AgentShield",
+  "database_migration": false,
+  "shared_files_rewritten": false,
+  "dynamic_router_expected": "app.api.enterprise",
+  "scope": [
+    "enterprise SAML trust configuration boundary",
+    "organization-wide security policies",
+    "retention and legal hold",
+    "SIEM/SOC export contracts",
+    "external KMS/HSM key descriptors and rotation bookkeeping",
+    "framework-neutral compliance controls",
+    "tenant security posture",
+    "enterprise dashboard client"
+  ],
+  "security_principles": [
+    "enterprise administration is tenant scoped",
+    "SSO configuration does not itself grant agent authority",
+    "raw cryptographic key material is never represented in the enterprise layer",
+    "SAML metadata and SIEM endpoints require HTTPS",
+    "cross-tenant SIEM export is rejected",
+    "retention can be suspended by legal hold",
+    "organization-wide policies can constrain runtime behavior but cannot mint authority",
+    "compliance claims are generated from explicit evidence requirements",
+    "identity != authority != influence != evidence"
+  ],
+  "integration_strategy": {
+    "sso": "configuration/trust-binding contract; assertion verification delegated to hardened IdP/library",
+    "retention": "policy contract; deletion execution remains behind durable storage owners",
+    "siem": "redacted batch contract; actual delivery remains behind a controlled outbound adapter",
+    "keys": "KMS/HSM descriptor contract; no raw key bytes",
+    "compliance": "deterministic control/evidence manifest",
+    "policy": "organization-wide constraints evaluated in addition to Trust Kernel decisions"
+  },
+  "production_boundary_notes": [
+    "The included in-memory key provider is a reference implementation only.",
+    "A production SAML implementation should use a hardened standards-compliant SAML library and enforce signature, audience, issuer, replay and clock checks.",
+    "A production SIEM sender should use the Phase 7 network egress boundary and a durable queue.",
+    "Retention enforcement should be executed by the owning durable stores and must honor legal hold."
+  ],
+  "files": [
+    "app/enterprise/__init__.py",
+    "app/enterprise/contracts.py",
+    "app/enterprise/sso.py",
+    "app/enterprise/retention.py",
+    "app/enterprise/siem.py",
+    "app/enterprise/keys.py",
+    "app/enterprise/compliance.py",
+    "app/enterprise/policies.py",
+    "app/enterprise/service.py",
+    "app/api/enterprise.py",
+    "dashboard/lib/enterprise-client.ts",
+    "tests/test_phase14_enterprise.py",
+    "PHASE14_MANIFEST.json",
+    "PHASE14_README.md"
+  ],
+  "depends_on": [
+    "Phase 4 Trust & Security Kernel",
+    "Phase 5 Tool Fabric",
+    "Phase 7 Isolation Fabric",
+    "Phase 8 Evidence Fabric",
+    "Phase 11 Control Plane",
+    "Phase 12 Ecosystem",
+    "Phase 13 Scale"
+  ],
+  "later_consumers": [
+    "Phase 15 Research"
+  ]
+}

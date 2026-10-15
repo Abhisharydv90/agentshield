@@ -1,0 +1,52 @@
+{
+  "phase": 9,
+  "name": "Security Lab",
+  "project": "AURAGENT",
+  "version": "9.0.0",
+  "status": "implementation-complete",
+  "purpose": "AttackForge, deterministic security scenarios, regression corpus, fuzzing, red-team simulation, and benchmark reports.",
+  "dependencies": {
+    "phase4": "Trust & Security Kernel",
+    "phase5": "Tool Fabric",
+    "phase6": "Memory Fabric",
+    "phase7": "Isolation Fabric",
+    "phase8": "Evidence Fabric"
+  },
+  "future_consumers": {
+    "phase10": ["LabRunReport.schema", "report_hash", "finding.evidence_root", "case_id", "scenario_id"],
+    "phase11": ["tenant-scoped run history", "role-gated API"],
+    "phase12": ["stable scenario/report schemas"],
+    "phase13": ["bounded orchestration interfaces"],
+    "phase14": ["admin controls and report exports"],
+    "phase15": ["authority/provenance benchmark corpus"]
+  },
+  "files": [
+    "app/lab/__init__.py",
+    "app/lab/runner.py",
+    "app/lab/orchestrator.py",
+    "app/lab/reports.py",
+    "app/lab/corpus/__init__.py",
+    "app/lab/corpus/store.py",
+    "app/lab/fuzzing/engine.py",
+    "app/lab/fuzzing/mutators.py",
+    "app/lab/scenarios/__init__.py",
+    "app/lab/scenarios/red_team.py",
+    "app/lab/scenarios/simulation.py",
+    "app/api/lab.py",
+    "tests/test_phase9_security_lab.py"
+  ],
+  "security_constraints": [
+    "No shell execution",
+    "No arbitrary subprocess execution",
+    "No outbound network activity",
+    "No credential retrieval",
+    "No automatic real-world exploit deployment",
+    "Tenant-scoped API",
+    "Admin/owner gate",
+    "Bounded case counts",
+    "Deterministic fuzz seeds",
+    "Content hashes for corpus items",
+    "Hash-committed run reports",
+    "Evidence roots are references/commitments, not raw evidence payloads"
+  ]
+}

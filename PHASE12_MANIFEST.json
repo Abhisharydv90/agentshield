@@ -1,0 +1,69 @@
+{
+  "phase": "12",
+  "name": "Ecosystem",
+  "status": "implementation-complete",
+  "umbrella": "AURAGENT",
+  "component": "AgentShield",
+  "database_migration": false,
+  "shared_files_rewritten": false,
+  "dynamic_router_expected": "app.api.ecosystem",
+  "scope": [
+    "SDK compatibility surface",
+    "plugin manifests and policy boundary",
+    "MCP server descriptors",
+    "A2A peer descriptors",
+    "enterprise and community integration descriptors",
+    "process-local ecosystem registry",
+    "dashboard ecosystem client"
+  ],
+  "security_principles": [
+    "ecosystem registration never grants authority",
+    "peer capability claims are untrusted until separately authorized",
+    "MCP and A2A endpoints require HTTPS",
+    "credentials are forbidden in endpoint URLs",
+    "wildcard permissions/resources are rejected",
+    "plugin execution is not performed by the ecosystem registry",
+    "secret material remains behind existing security boundaries",
+    "tenant context and admin roles gate registry mutation",
+    "identity != authority != influence != evidence"
+  ],
+  "integration_strategy": {
+    "registry": "process-local reference implementation with stable contracts",
+    "plugins": "descriptor-only; execution remains behind Tool Fabric and Isolation Fabric",
+    "mcp": "descriptor-only; invocation remains behind Phase 5 Tool Fabric",
+    "a2a": "descriptor-only; cross-agent authority remains behind Trust Kernel delegation",
+    "sdk": "thin HTTPS request builder; no client-side authority logic",
+    "integrations": "vendor-neutral domain allowlist plus server-side secret references"
+  },
+  "files": [
+    "app/ecosystem/__init__.py",
+    "app/ecosystem/contracts.py",
+    "app/ecosystem/manifest.py",
+    "app/ecosystem/registry.py",
+    "app/ecosystem/plugins.py",
+    "app/ecosystem/mcp.py",
+    "app/ecosystem/a2a.py",
+    "app/ecosystem/integrations.py",
+    "app/ecosystem/sdk.py",
+    "app/ecosystem/service.py",
+    "app/api/ecosystem.py",
+    "app/sdk/auragent/__init__.py",
+    "app/sdk/auragent/client.py",
+    "dashboard/lib/ecosystem-client.ts",
+    "tests/test_phase12_ecosystem.py",
+    "PHASE12_MANIFEST.json",
+    "PHASE12_README.md"
+  ],
+  "depends_on": [
+    "Phase 4 Trust & Security Kernel",
+    "Phase 5 Tool Fabric",
+    "Phase 7 Isolation Fabric",
+    "Phase 8 Evidence Fabric",
+    "Phase 11 Control Plane"
+  ],
+  "later_consumers": [
+    "Phase 13 Scale",
+    "Phase 14 Enterprise",
+    "Phase 15 Research"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "phase": "10",
+  "name": "Investigation Platform",
+  "status": "implementation-complete",
+  "umbrella": "AURAGENT",
+  "component": "AgentShield",
+  "database_migration": false,
+  "shared_files_rewritten": false,
+  "dynamic_router_expected": "app.api.investigation",
+  "principles": [
+    "tenant isolation",
+    "read-only evidence access",
+    "bounded graph traversal",
+    "bounded search",
+    "deterministic incident identifiers",
+    "causal reconstruction",
+    "forensic-only replay",
+    "redacted explainability",
+    "identity != authority != influence != evidence"
+  ],
+  "files": [
+    "app/investigation/__init__.py",
+    "app/investigation/contracts.py",
+    "app/investigation/graph.py",
+    "app/investigation/timeline.py",
+    "app/investigation/causality.py",
+    "app/investigation/replay.py",
+    "app/investigation/search.py",
+    "app/investigation/explain.py",
+    "app/investigation/db.py",
+    "app/investigation/service.py",
+    "app/api/investigation.py",
+    "dashboard/lib/investigation-client.ts",
+    "tests/test_phase10_investigation.py",
+    "PHASE10_MANIFEST.json",
+    "PHASE10_README.md"
+  ],
+  "depends_on": [
+    "Phase 8 Evidence Fabric",
+    "Phase 9 Security Lab"
+  ],
+  "later_consumers": [
+    "Phase 11 Control Plane",
+    "Phase 13 Scale",
+    "Phase 14 Enterprise",
+    "Phase 15 Research"
+  ]
+}

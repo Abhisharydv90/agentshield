@@ -332,8 +332,15 @@ async def reconstruct_trace(
                 EvidenceNode.created_at.asc(),
                 EvidenceNode.evidence_id.asc(),
             )
+            .limit(
+                max_events + 1
+            )
         )
     ).scalars().all()
+
+    if len(node_rows) > max_events:
+        truncated = True
+        node_rows = node_rows[:max_events]
 
     nodes = node_rows
 

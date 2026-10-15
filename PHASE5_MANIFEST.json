@@ -1,0 +1,42 @@
+{
+  "phase": 5,
+  "name": "Tool Fabric",
+  "status": "implementation_complete_verification_deferred",
+  "objective": [
+    "tool contracts and registry",
+    "security-aware dispatch",
+    "resource authorization",
+    "MCP Streamable HTTP boundary",
+    "browser/computer-use policy boundary",
+    "capability-gated secret boundary",
+    "operator-only custom tool loading",
+    "stable discovery API"
+  ],
+  "files": [
+    "app/api/tools.py",
+    "app/main.py",
+    "app/proxy/router.py",
+    "app/tools/__init__.py",
+    "app/tools/browser/__init__.py",
+    "app/tools/browser/controller.py",
+    "app/tools/browser/policy.py",
+    "app/tools/contracts.py",
+    "app/tools/custom/loader.py",
+    "app/tools/dispatcher.py",
+    "app/tools/mcp/__init__.py",
+    "app/tools/mcp/client.py",
+    "app/tools/mcp/session.py",
+    "app/tools/registry.py",
+    "app/tools/resources.py",
+    "app/tools/secrets/__init__.py",
+    "app/tools/secrets/boundary.py",
+    "tests/test_phase5_tool_fabric.py"
+  ],
+  "integration": {
+    "main_router_added": "app.api.tools",
+    "proxy_changed": false,
+    "proxy_reason": "Phase 5 execution belongs in ToolDispatcher; proxy remains the model/data-plane security boundary.",
+    "future_phase_compatibility": "SecurityContext + ToolManifest + ToolInvocation + ToolResult are stable interfaces for Phases 6-15."
+  },
+  "standards_note": "MCP transport headers are aligned with the 2026-07-28 Streamable HTTP direction; full protocol conformance remains a later integration/testing concern."
+}

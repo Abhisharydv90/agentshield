@@ -1,0 +1,72 @@
+{
+  "phase": "13",
+  "name": "Scale",
+  "status": "implementation-complete",
+  "umbrella": "AURAGENT",
+  "component": "AgentShield",
+  "database_migration": false,
+  "shared_files_rewritten": false,
+  "dynamic_router_expected": "app.api.scale",
+  "scope": [
+    "stateless-facing service contracts",
+    "distributed worker leases with fencing",
+    "partition and tenant sharding",
+    "event bus envelope and ordering contract",
+    "idempotency",
+    "distributed work scheduler",
+    "durable workflow checkpoint contract",
+    "multi-region routing",
+    "health/degradation evaluation",
+    "dashboard scale client"
+  ],
+  "architecture": {
+    "runtime": "existing Phase 2 runtime remains the execution owner",
+    "authority": "Phase 4 Trust Kernel remains the authority boundary",
+    "tools": "Phase 5 Tool Fabric remains the tool execution owner",
+    "isolation": "Phase 7 Isolation Fabric remains the environment boundary",
+    "evidence": "Phase 8 Evidence Fabric remains the provenance/audit owner",
+    "investigation": "Phase 10 consumes evidence; Scale does not replace it",
+    "control_plane": "Phase 11 remains the administrative boundary",
+    "ecosystem": "Phase 12 remains the interoperability boundary"
+  },
+  "distributed_invariants": [
+    "stale workers are fenced by monotonically increasing lease tokens",
+    "event sequence numbers are contiguous per tenant/topic/partition",
+    "idempotency keys cannot be reused for a different request digest",
+    "workflow checkpoints use optimistic versioning",
+    "tenant shard assignment is deterministic",
+    "region selection fails closed when the region set is invalid",
+    "workers never receive new authority from the scheduler"
+  ],
+  "reference_backend_note": "In-memory lease/event/idempotency/workflow stores are deterministic reference implementations; production multi-worker deployments require shared durable infrastructure.",
+  "files": [
+    "app/scale/__init__.py",
+    "app/scale/contracts.py",
+    "app/scale/sharding.py",
+    "app/scale/leases.py",
+    "app/scale/idempotency.py",
+    "app/scale/events.py",
+    "app/scale/scheduler.py",
+    "app/scale/regions.py",
+    "app/scale/workflows.py",
+    "app/scale/health.py",
+    "app/scale/service.py",
+    "app/api/scale.py",
+    "dashboard/lib/scale-client.ts",
+    "tests/test_phase13_scale.py",
+    "PHASE13_MANIFEST.json",
+    "PHASE13_README.md"
+  ],
+  "depends_on": [
+    "Phase 2 Runtime & Orchestration",
+    "Phase 4 Trust & Security Kernel",
+    "Phase 7 Isolation Fabric",
+    "Phase 8 Evidence Fabric",
+    "Phase 11 Control Plane",
+    "Phase 12 Ecosystem"
+  ],
+  "later_consumers": [
+    "Phase 14 Enterprise",
+    "Phase 15 Research"
+  ]
+}

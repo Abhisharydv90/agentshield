@@ -1,16 +1,19 @@
 """
-AgentShield — application entrypoint.
+AURAGENT — application composition root.
 
-Wires together:
-  - FastAPI app with lifespan management
-  - Middleware stack: trace, rate limit, trusted hosts, CORS, CSRF, auth
-  - Routers: telemetry, proxy, auth, tenant, approvals, meta
-  - Global exception handlers with structured JSON responses
-  - Dev-only routes (gated behind settings.ENV != "prod")
+AURAGENT is the umbrella platform. AgentShield remains a security
+component inside the wider Gateway → Runtime → Trust/Tool/Isolation →
+Evidence architecture.
+
+This file is intentionally kept as a stable composition root for
+Phases 0-15. Future phase routers register through the discovery list
+below so this file does not need to be rewritten every time a new
+subsystem is introduced.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 import time
 import uuid
@@ -51,102 +54,294 @@ log = logging.getLogger("agentshield")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    log.info("=" * 62)
+    """
+    Application startup/shutdown orchestration.
+
+    Startup order:
+        infrastructure checks
+            ↓
+        runtime heartbeat
+            ↓
+        serve requests
+
+    Shutdown:
+        stop runtime first
+            ↓
+        release DB/runtime resources
+    """
+
+    log.info("=" * 72)
     log.info(
-        "  AgentShield starting · env=%s · service=%s",
+        "  AURAGENT starting · env=%s · service=%s",
         settings.ENV,
         settings.SERVICE_NAME,
     )
-    log.info("=" * 62)
+    log.info("=" * 72)
+
+    # --------------------------------------------------------
+    # PostgreSQL
+    # --------------------------------------------------------
+
+    postgres_ok = False
 
     try:
         from sqlalchemy import text
         from app.db.session import async_session
+
         async with async_session() as session:
-            await session.execute(text("SELECT 1"))
+            await session.execute(
+                text("SELECT 1")
+            )
+
+        postgres_ok = True
         log.info("✓ Postgres reachable")
-    except Exception as e:
-        log.warning("✗ Postgres unreachable — %s", e)
+
+    except Exception as exc:
+        log.warning(
+            "✗ Postgres unreachable — %s",
+            exc,
+        )
+
+    # --------------------------------------------------------
+    # Redis
+    # --------------------------------------------------------
 
     try:
         from app.security.pii.vault import _get_redis
-        r = _get_redis()
-        if r is not None:
-            await r.ping()
+
+        redis_client = _get_redis()
+
+        if redis_client is not None:
+            await redis_client.ping()
             log.info("✓ Redis reachable")
         else:
-            log.warning("✗ Redis client failed to initialize")
-    except Exception as e:
-        log.warning("✗ Redis unreachable — %s", e)
+            log.warning(
+                "✗ Redis client failed to initialize"
+            )
 
-    yield
+    except Exception as exc:
+        log.warning(
+            "✗ Redis unreachable — %s",
+            exc,
+        )
 
-    log.info("AgentShield shutting down")
+    # --------------------------------------------------------
+    # Runtime heartbeat
+    # --------------------------------------------------------
 
+    runtime_started = False
+
+    try:
+        from app.runtime.bootstrap import start_runtime
+
+        await start_runtime()
+
+        runtime_started = True
+        app.state.runtime_started = True
+
+        log.info(
+            "✓ AURAGENT runtime heartbeat started"
+        )
+
+    except Exception as exc:
+        app.state.runtime_started = False
+
+        log.error(
+            "✗ AURAGENT runtime failed to start — %s",
+            exc,
+        )
+
+        if settings.ENV == "prod":
+            raise
+
+    app.state.postgres_ok = postgres_ok
+
+    try:
+        yield
+
+    finally:
+        # ----------------------------------------------------
+        # Stop runtime before process shutdown
+        # ----------------------------------------------------
+
+        if runtime_started:
+            try:
+                from app.runtime.bootstrap import stop_runtime
+
+                await stop_runtime()
+
+                log.info(
+                    "✓ AURAGENT runtime heartbeat stopped"
+                )
+
+            except Exception as exc:
+                log.warning(
+                    "Runtime shutdown warning — %s",
+                    exc,
+                )
+
+        try:
+            from app.db.session import dispose_engine
+
+            await dispose_engine()
+
+            log.info(
+                "✓ Database engine disposed"
+            )
+
+        except Exception as exc:
+            log.warning(
+                "Database shutdown warning — %s",
+                exc,
+            )
+
+        log.info(
+            "AURAGENT shutting down"
+        )
 
 
 
 class RequestBodyTooLargeError(Exception):
-    pass
+    """Raised when an incoming HTTP body exceeds the configured limit."""
 
 
 class RequestBodyLimitMiddleware:
-    """Reject oversized HTTP bodies before application parsing/PII processing."""
+    """
+    Reject oversized HTTP bodies before JSON parsing/PII processing.
 
-    def __init__(self, app: Any) -> None:
+    This is pure ASGI so streaming responses remain untouched.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+    ) -> None:
         self.app = app
-        self.limit = settings.MAX_REQUEST_BODY_BYTES
+        self.limit = int(
+            settings.MAX_REQUEST_BODY_BYTES
+        )
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
         if scope["type"] != "http":
-            await self.app(scope, receive, send)
+            await self.app(
+                scope,
+                receive,
+                send,
+            )
             return
 
         headers = {
-            key.decode("latin-1").lower(): value.decode("latin-1")
-            for key, value in scope.get("headers", [])
+            key.decode("latin-1").lower():
+            value.decode("latin-1")
+            for key, value in scope.get(
+                "headers",
+                [],
+            )
         }
-        content_length = headers.get("content-length")
+
+        content_length = headers.get(
+            "content-length"
+        )
+
         if content_length:
             try:
                 if int(content_length) > self.limit:
                     response = JSONResponse(
                         status_code=413,
                         content={
-                            "error": "request_body_too_large",
+                            "error":
+                                "request_body_too_large",
                             "status": 413,
                         },
-                        headers={"Cache-Control": "no-store"},
+                        headers={
+                            "Cache-Control":
+                                "no-store"
+                        },
                     )
-                    await response(scope, receive, send)
+
+                    await response(
+                        scope,
+                        receive,
+                        send,
+                    )
+
                     return
+
             except ValueError:
                 response = JSONResponse(
                     status_code=400,
-                    content={"error": "invalid_content_length", "status": 400},
+                    content={
+                        "error":
+                            "invalid_content_length",
+                        "status": 400,
+                    },
+                    headers={
+                        "Cache-Control":
+                            "no-store"
+                    },
                 )
-                await response(scope, receive, send)
+
+                await response(
+                    scope,
+                    receive,
+                    send,
+                )
+
                 return
 
         received = 0
-        done = False
 
         async def limited_receive() -> dict:
-            nonlocal received, done
+            nonlocal received
+
             message = await receive()
+
             if message["type"] != "http.request":
                 return message
 
-            body = message.get("body", b"")
+            body = message.get(
+                "body",
+                b"",
+            )
+
             received += len(body)
+
             if received > self.limit:
                 raise RequestBodyTooLargeError
 
-            if not message.get("more_body", False):
-                done = True
             return message
 
-        await self.app(scope, limited_receive, send)
+        try:
+            await self.app(
+                scope,
+                limited_receive,
+                send,
+            )
+
+        except RequestBodyTooLargeError:
+            response = JSONResponse(
+                status_code=413,
+                content={
+                    "error":
+                        "request_body_too_large",
+                    "status": 413,
+                },
+                headers={
+                    "Cache-Control":
+                        "no-store"
+                },
+            )
+
+            await response(
+                scope,
+                receive,
+                send,
+            )
 
 # ============================================================
 # App
@@ -155,12 +350,12 @@ class RequestBodyLimitMiddleware:
 _is_prod = settings.ENV == "prod"
 
 app = FastAPI(
-    title="AgentShield",
-    version="0.2.0",
+    title="AURAGENT",
+    version="0.5.0",
     description=(
-        "Autonomous Agent Firewall & Evaluation Gateway. "
-        "A zero-trust proxy that intercepts, evaluates, and secures bidirectional "
-        "traffic between AI agents, LLM providers, and enterprise tools."
+        "AURAGENT — Autonomous Agent Infrastructure & Trust Fabric. "
+        "AgentShield provides the security enforcement component across "
+        "Gateway, Runtime, Tool, Isolation, and Evidence boundaries."
     ),
     docs_url=None if _is_prod else "/docs",
     redoc_url=None if _is_prod else "/redoc",
@@ -174,48 +369,142 @@ app = FastAPI(
 # ============================================================
 
 class TraceMiddleware:
-    """Pure ASGI middleware. Safe for SSE / chunked responses."""
+    """
+    Pure ASGI trace middleware.
 
-    def __init__(self, app: Any) -> None:
+    Every HTTP request receives a bounded trace ID and every response
+    receives the same trace ID plus response timing.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+    ) -> None:
         self.app = app
 
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
         if scope["type"] != "http":
-            await self.app(scope, receive, send)
+            await self.app(
+                scope,
+                receive,
+                send,
+            )
             return
 
-        headers = {
-            k.decode().lower(): v.decode()
-            for k, v in scope.get("headers", [])
-        }
-        trace_id = get_trace_id(Request(scope))
+        request = Request(
+            scope,
+            receive=receive,
+        )
 
-        state = scope.setdefault("state", {})
+        trace_id = get_trace_id(
+            request
+        )
+
+        state = scope.setdefault(
+            "state",
+            {},
+        )
+
         state["trace_id"] = trace_id
 
         start = time.perf_counter()
-        status_code_holder: dict[str, int] = {"code": 0}
+        status_code_holder = {
+            "code": 0
+        }
 
-        async def send_wrapper(message: dict) -> None:
-            if message["type"] == "http.response.start":
-                status_code_holder["code"] = message.get("status", 0)
-                response_headers = list(message.get("headers", []))
-                response_headers.append((b"x-trace-id", trace_id.encode()))
-                duration_ms = (time.perf_counter() - start) * 1000
-                response_headers.append(
-                    (b"x-response-time", f"{duration_ms:.2f}ms".encode())
+        async def send_wrapper(
+            message: dict,
+        ) -> None:
+            if (
+                message["type"]
+                == "http.response.start"
+            ):
+                status_code_holder[
+                    "code"
+                ] = message.get(
+                    "status",
+                    0,
                 )
-                message["headers"] = response_headers
-            await send(message)
+
+                response_headers = list(
+                    message.get(
+                        "headers",
+                        [],
+                    )
+                )
+
+                response_headers.append(
+                    (
+                        b"x-trace-id",
+                        trace_id.encode(
+                            "utf-8"
+                        ),
+                    )
+                )
+
+                duration_ms = (
+                    time.perf_counter()
+                    - start
+                ) * 1000
+
+                response_headers.append(
+                    (
+                        b"x-response-time",
+                        f"{duration_ms:.2f}ms".encode(
+                            "ascii"
+                        ),
+                    )
+                )
+
+                message["headers"] = (
+                    response_headers
+                )
+
+            await send(
+                message
+            )
 
         try:
-            await self.app(scope, receive, send_wrapper)
+            await self.app(
+                scope,
+                receive,
+                send_wrapper,
+            )
+
         finally:
-            duration_ms = (time.perf_counter() - start) * 1000
-            path = scope.get("path", "")
-            method = scope.get("method", "")
-            code = status_code_holder["code"] or 500
-            level = logging.WARNING if code >= 400 else logging.INFO
+            duration_ms = (
+                time.perf_counter()
+                - start
+            ) * 1000
+
+            path = scope.get(
+                "path",
+                "",
+            )
+
+            method = scope.get(
+                "method",
+                "",
+            )
+
+            code = (
+                status_code_holder[
+                    "code"
+                ]
+                or 500
+            )
+
+            level = (
+                logging.WARNING
+                if code >= 400
+                else logging.INFO
+            )
+
             log.log(
                 level,
                 "%s %s · %d · %.2fms · trace=%s",
@@ -233,13 +522,15 @@ class TraceMiddleware:
 # Starlette semantics: add_middleware() PREPENDS. The LAST call is OUTERMOST.
 # We add innermost → outermost so the execution order is:
 #
-#   Trace → RateLimit → TrustedHost → CORS → CSRF → Auth → routes
+#   Trace → RateLimit → TrustedHost → CORS → CSRF → Auth → BodyLimit → routes
 #
-# Trace must be outermost so every response (including errors) gets a
-# trace ID. RateLimit next — cheap, kills floods before any work happens.
-# TrustedHost before CORS so bad hosts die early. CORS before CSRF/Auth
-# so preflight OPTIONS short-circuits and never hits session checks.
-# Auth innermost so it wraps only the routes that actually need identity.
+# Trace is outermost so responses receive trace IDs.
+# RateLimit rejects floods early.
+# TrustedHost rejects untrusted hosts.
+# CORS handles browser policy/preflight.
+# CSRF protects browser-authenticated state-changing requests.
+# Auth establishes human/agent identity.
+# BodyLimit rejects oversized bodies before expensive processing.
 # ============================================================
 
 _allowed_hosts = (
@@ -374,20 +665,149 @@ async def unhandled_exception_handler(
 
 
 # ============================================================
-# Routers
+# Router registration
 # ============================================================
 
-from app.api.telemetry import router as telemetry_router
-from app.proxy.router import router as proxy_router
-from app.api.auth import router as auth_router
-from app.api.tenant import router as tenant_router
-from app.api.approvals import router as approvals_router
+def _include_router_module(
+    module_name: str,
+    *,
+    required: bool = False,
+) -> bool:
+    """
+    Register a FastAPI router from a module when available.
 
-app.include_router(telemetry_router)
-app.include_router(proxy_router)
-app.include_router(auth_router)
-app.include_router(tenant_router)
-app.include_router(approvals_router)
+    Phase 0-2 core routers are required.
+    Phase 3-15 routers are discovered dynamically so future phases
+    can add implementations without repeatedly editing main.py.
+
+    A module without a `router` attribute is treated as an unimplemented
+    scaffold and is skipped.
+    """
+
+    try:
+        module = importlib.import_module(
+            module_name
+        )
+
+        candidate = getattr(
+            module,
+            "router",
+            None,
+        )
+
+        if candidate is None:
+            log.debug(
+                "Skipping router without `router`: %s",
+                module_name,
+            )
+            return False
+
+        app.include_router(
+            candidate
+        )
+
+        log.info(
+            "✓ Router registered: %s",
+            module_name,
+        )
+
+        return True
+
+    except ModuleNotFoundError as exc:
+        # A missing top-level optional router module is expected while
+        # a future AURAGENT phase is still under construction.
+        if exc.name == module_name and not required:
+            log.debug(
+                "Optional router not present: %s",
+                module_name,
+            )
+            return False
+
+        # A dependency failure inside an existing router is a real
+        # application error. Production must not silently lose a route.
+        raise
+
+    except Exception:
+        if required or settings.ENV == "prod":
+            raise
+
+        log.exception(
+            "Optional router failed to load: %s",
+            module_name,
+        )
+
+        return False
+
+
+# Existing AgentShield / Phase 0-2 routers.
+_REQUIRED_ROUTER_MODULES = (
+    "app.api.telemetry",
+    "app.proxy.router",
+    "app.api.auth",
+    "app.api.tenant",
+    "app.api.approvals",
+)
+
+for _module in _REQUIRED_ROUTER_MODULES:
+    _include_router_module(
+        _module,
+        required=True,
+    )
+
+
+# AURAGENT Phase 1-15 router discovery.
+#
+# Implement a `router = APIRouter(...)` in any module below and the
+# composition root will pick it up automatically.
+_OPTIONAL_AURAGENT_ROUTER_MODULES = (
+    # Phase 1 — Development Platform
+    "app.api.agents",
+    "app.api.deployments",
+
+    # Phase 2 — Runtime
+    "app.api.runtime",
+    "app.api.workflows",
+
+    # Phase 3 — Gateway
+    "app.gateway.router",
+
+    # Phase 8 — Evidence administration
+    "app.api.evidence_admin",
+
+    # Phase 9 — Security Lab
+    "app.api.lab",
+
+    # Phase 10 — Investigation
+    "app.api.investigation",
+
+    # Phase 11 — Control Plane
+    "app.api.control_plane",
+
+    # Phase 12 — Ecosystem
+    "app.api.ecosystem",
+
+    # Phase 13 — Scale
+    "app.api.scale",
+
+    # Phase 14 — Enterprise
+    "app.api.enterprise",
+
+    # Phase 15 — Research
+    "app.api.research",
+    "app.api.trust",
+
+    # Phase 5 — Tool Fabric
+    "app.api.tools",
+
+    # Phase 6 — Memory Fabric
+    "app.api.memory",
+    "app.api.isolation",
+)
+
+for _module in _OPTIONAL_AURAGENT_ROUTER_MODULES:
+    _include_router_module(
+        _module
+    )
 
 
 # ============================================================
@@ -397,9 +817,13 @@ app.include_router(approvals_router)
 @app.get("/", tags=["meta"])
 async def root() -> dict:
     return {
-        "service": "agentshield",
+        "service": settings.SERVICE_NAME,
+        "platform": "AURAGENT",
+        "component": "AgentShield",
         "version": app.version,
-        "description": "Autonomous Agent Firewall & Evaluation Gateway",
+        "description": (
+            "Autonomous Agent Infrastructure & Trust Fabric"
+        ),
         "docs": "/docs" if not _is_prod else None,
         "health": "/health",
         "readiness": "/ready",
@@ -411,15 +835,36 @@ async def root() -> dict:
 async def health() -> dict:
     return {
         "status": "ok",
+        "platform": "AURAGENT",
+        "component": "AgentShield",
         "env": settings.ENV,
         "service": settings.SERVICE_NAME,
         "version": app.version,
+        "runtime": {
+            "started": bool(
+                getattr(
+                    app.state,
+                    "runtime_started",
+                    False,
+                )
+            ),
+        },
     }
 
 
 @app.get("/ready", tags=["meta"])
 async def readiness() -> JSONResponse:
-    checks: dict[str, bool] = {"postgres": False, "redis": False}
+    checks: dict[str, bool] = {
+        "postgres": False,
+        "redis": False,
+        "runtime": bool(
+            getattr(
+                app.state,
+                "runtime_started",
+                False,
+            )
+        ),
+    }
 
     try:
         from sqlalchemy import text
@@ -439,11 +884,14 @@ async def readiness() -> JSONResponse:
     except Exception as e:
         log.warning("Readiness: redis unreachable — %s", e)
 
+    # The runtime heartbeat is part of the AURAGENT control path.
     all_ok = all(checks.values())
     return JSONResponse(
         status_code=200 if all_ok else 503,
         content={
             "status": "ready" if all_ok else "not_ready",
+            "platform": "AURAGENT",
+            "component": "AgentShield",
             "checks": checks,
             "version": app.version,
         },

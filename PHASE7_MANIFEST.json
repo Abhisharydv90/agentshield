@@ -1,0 +1,53 @@
+{
+  "phase": "7",
+  "name": "AURAGENT Isolation Fabric",
+  "base_phase": "6",
+  "scope": [
+    "container sandboxing",
+    "process isolation contract with fail-closed unsupported backend",
+    "filesystem boundaries",
+    "network egress policy",
+    "CPU/memory/PID/time/output quotas",
+    "device boundaries",
+    "non-root execution",
+    "read-only root filesystem",
+    "no-new-privileges",
+    "capability drop",
+    "environment templates",
+    "Phase 4 SecurityContext enforcement",
+    "Phase 5 secret-boundary compatibility"
+  ],
+  "files": [
+    "app/isolation/__init__.py",
+    "app/isolation/quotas.py",
+    "app/isolation/filesystem/mounts.py",
+    "app/isolation/network/egress.py",
+    "app/isolation/device.py",
+    "app/isolation/policy.py",
+    "app/isolation/container/backend.py",
+    "app/isolation/container/lifecycle.py",
+    "app/isolation/runner.py",
+    "app/api/isolation.py",
+    "tests/test_phase7_isolation_fabric.py",
+    "PHASE7_README.md"
+  ],
+  "security_invariants": [
+    "isolation execution requires execute capability",
+    "filesystem bind mounts require explicit allowed host roots",
+    "read-write mounts require filesystem:write",
+    "external egress is denied unless a managed egress boundary exists",
+    "network defaults to Docker network=none",
+    "host root and container root mounts are forbidden",
+    "root user is forbidden",
+    "read-only root filesystem is mandatory",
+    "no-new-privileges is mandatory",
+    "all container capabilities are dropped",
+    "devices are deny-by-default and allowlist-only",
+    "resource quotas are bounded by a server ceiling",
+    "images are never auto-pulled by the backend",
+    "shell execution is disabled by default",
+    "secrets are not accepted through raw isolation environment variables",
+    "unsupported process isolation fails closed"
+  ],
+  "build_policy": "Complete implementation first; comprehensive integration verification is deferred to final AURAGENT verification."
+}

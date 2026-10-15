@@ -1,0 +1,47 @@
+{
+  "phase": "8",
+  "name": "AURAGENT Evidence Fabric \u2014 completion layer",
+  "master_scope": [
+    "execution traces",
+    "provenance graph",
+    "immutable audit",
+    "forensic replay",
+    "causal linkage",
+    "integrity verification",
+    "compliance exports",
+    "distributed evidence invariants",
+    "fenced writer leases",
+    "external audit anchoring contract"
+  ],
+  "preexisting_phase7f_foundation": [
+    "app/security/evidence/hashing.py",
+    "app/security/evidence/runtime.py",
+    "app/security/evidence/query.py",
+    "app/security/evidence/forensics.py",
+    "app/telemetry/audit.py"
+  ],
+  "installed_completion_files": [
+    "app/security/evidence/distributed/__init__.py",
+    "app/security/evidence/distributed/invariants.py",
+    "app/security/evidence/distributed/lease.py",
+    "app/security/evidence/anchoring/__init__.py",
+    "app/security/evidence/anchoring/external.py",
+    "app/api/evidence_admin.py",
+    "dashboard/lib/evidence-admin-client.ts",
+    "tests/test_evidence_scale.py"
+  ],
+  "security_invariants": [
+    "tenant scoping is mandatory",
+    "evidence is content-addressed",
+    "raw evaluator reasoning is not exported by the evidence admin API",
+    "forensic replay is read-only and never executes agent actions",
+    "distributed batches cannot mix tenants",
+    "distributed writer sequence cannot fork or skip",
+    "fencing tokens increase monotonically",
+    "external anchoring submits commitments rather than raw evidence",
+    "external anchor endpoints are HTTPS-only and host-allowlisted",
+    "redirects and automatic retries are disabled",
+    "no background anchoring is started"
+  ],
+  "build_policy": "Implementation first; comprehensive integration, database, dashboard and deployment verification deferred to final AURAGENT verification."
+}

@@ -402,3 +402,38 @@ async def test_compliance_package_hash_is_stable_for_same_contents():
         await _delete_tenant(
             tenant_id
         )
+@pytest.mark.asyncio
+async def test_trace_node_limit_is_enforced_at_reconstruction_boundary():
+    tenant_id = await _create_tenant(
+        "phase8-node-limit"
+    )
+
+    trace_id = (
+        "phase8-node-limit-"
+        + uuid.uuid4().hex
+    )
+
+    try:
+        await _write_trace_events(
+            tenant_id=tenant_id,
+            trace_id=trace_id,
+            count=3,
+        )
+
+        async with async_session() as session:
+            trace = await reconstruct_trace(
+                session=session,
+                tenant_id=tenant_id,
+                trace_id=trace_id,
+                max_events=2,
+            )
+
+        assert trace is not None
+        assert trace.event_count == 2
+        assert trace.node_count == 2
+        assert trace.truncated is True
+
+    finally:
+        await _delete_tenant(
+            tenant_id
+        )

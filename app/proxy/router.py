@@ -1,25 +1,44 @@
 """
-AgentShield runtime proxy.
+AURAGENT model/security proxy.
+
+This remains the security-aware data-plane path used by the original
+AgentShield runtime and by the AURAGENT Gateway.
 
 Request path:
 
-    API Key
+    Gateway / direct API
         ↓
-    Agent Identity
+    Tenant binding
         ↓
-    Agent status
+    Agent identity
         ↓
-    agent:invoke
+    agent:invoke capability
         ↓
     inbound security
         ↓
-    upstream LLM
+    PII controls
         ↓
-    proposed tool-call authorization
+    active policy
+        ↓
+    configured model route
+        ↓
+    upstream model
+        ↓
+    outbound tool-call authorization
         ↓
     Security Decision Engine
         ↓
-    downstream Agent
+    audit / evidence
+        ↓
+    downstream agent
+
+The proxy never trusts a client-supplied upstream URL.
+Gateway model targets resolve to server-side configured routes.
+
+The same file remains the stable model data-plane boundary for AURAGENT Phases 4-15.
+Memory is handled by the Memory Fabric and never becomes authority merely
+because retrieved content influences a model response. Later phases attach
+through stable security, tool, isolation, evidence, and control boundaries.
 """
 
 from __future__ import annotations
@@ -41,7 +60,7 @@ from fastapi.responses import (
 from sqlalchemy import select, update
 
 from app.config import settings
-from app.db.models import Agent, Policy as PolicyModel
+from app.db.models import Agent, AgentIdentity, Policy as PolicyModel
 from app.db.session import async_session
 from app.middleware.trace import get_trace_id
 from app.policy.dsl import (
@@ -49,6 +68,15 @@ from app.policy.dsl import (
     Policy,
     policy_from_db_rules,
 )
+from app.gateway.routing.model import (
+    ModelRouteError,
+    get_model_router,
+)
+from app.security.context import SecurityContext
+from app.security.delegation.model import AuthorityState
+from app.security.kernel import AuthorityDeniedError, SecurityKernel
+from app.security.proofs.authority_token import AuthorityToken, AuthorityTokenVerificationError
+from app.security.proofs.policy_commitment import PolicyCommitment
 from app.proxy.outbound import (
     authorize_non_streaming_response,
     process_outbound_stream,
@@ -155,6 +183,147 @@ async def _touch_agent(
     except Exception:
         pass
 
+
+# ============================================================
+# Model route resolution
+# ============================================================
+
+def _resolve_upstream(
+    request: Request,
+) -> tuple[str, dict[str, str], float]:
+    """
+    Resolve the upstream model endpoint.
+
+    Gateway-originated requests carry a server-populated
+    `request.state.gateway_model_route`.
+
+    Direct legacy AgentShield requests continue using UPSTREAM_URL.
+    """
+
+    gateway_route = getattr(
+        request.state,
+        "gateway_model_route",
+        None,
+    )
+
+    if gateway_route:
+        try:
+            route = get_model_router().resolve(
+                gateway_route
+            )
+        except ModelRouteError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="model_route_unavailable",
+            ) from exc
+
+        headers = route.upstream_headers()
+
+        # Backward-compatible default route: the existing AgentShield
+        # configuration supplies UPSTREAM_KEY even when the new AURAGENT
+        # route registry does not explicitly define api_key_env.
+        if (
+            "Authorization" not in headers
+            and settings.UPSTREAM_KEY
+        ):
+            headers["Authorization"] = (
+                f"Bearer {settings.UPSTREAM_KEY}"
+            )
+
+        return (
+            route.chat_completions_url,
+            headers,
+            route.timeout_seconds,
+        )
+
+    return (
+        (
+            f"{settings.UPSTREAM_URL}"
+            "/v1/chat/completions"
+        ),
+        {
+            "Authorization":
+                f"Bearer {settings.UPSTREAM_KEY}",
+            "Content-Type":
+                "application/json",
+        },
+        float(
+            settings.UPSTREAM_TIMEOUT
+        ),
+    )
+
+
+
+
+# ============================================================
+# Phase 4 — authority token binding
+# ============================================================
+
+async def _bind_presented_authority(
+    *,
+    request: Request,
+    tenant_id,
+    agent,
+    policy: Policy,
+    policy_version: str,
+    trace_id: str,
+) -> SecurityContext | None:
+    """Validate an optional signed authority token against the authenticated Agent.
+
+    The token is deliberately optional during the migration from AgentShield's
+    legacy scope path. When present, it is strict: identity, tenant, subject,
+    signature, policy content and authority conservation all have to pass.
+    """
+
+    raw = request.headers.get("X-AURAGENT-Authority-Token")
+    if not raw:
+        return None
+
+    try:
+        token = AuthorityToken.from_dict(__import__("json").loads(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="invalid_authority_token") from exc
+
+    async with async_session() as session:
+        identity = (
+            await session.execute(
+                select(AgentIdentity)
+                .where(AgentIdentity.tenant_id == tenant_id)
+                .where(AgentIdentity.agent_id == agent.agent_id)
+                .where(AgentIdentity.status == "active")
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    if identity is None:
+        raise HTTPException(status_code=401, detail="agent_cryptographic_identity_not_registered")
+
+    commitment = PolicyCommitment.from_policy(
+        policy,
+        name=getattr(policy, "name", None),
+        version=policy_version,
+    )
+
+    try:
+        context = SecurityKernel().validate_token_against_agent(
+            token=token,
+            identity=identity,
+            agent=agent,
+            expected_policy_hash=commitment.content_hash,
+        )
+    except AuthorityDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    return SecurityContext(
+        tenant_id=context.tenant_id,
+        agent_id=context.agent_id,
+        trace_id=trace_id,
+        capabilities=context.capabilities,
+        authority=context.authority,
+        policy_hash=context.policy_hash,
+        authority_token_hash=context.authority_token_hash,
+        provenance={"source": "x-auragent-authority-token"},
+    )
 
 # ============================================================
 # Runtime endpoint
@@ -359,31 +528,28 @@ async def chat_completions(
         tenant_id
     )
 
-    # ========================================================
-    # Upstream
+        # ========================================================
+    # Upstream model route
     # ========================================================
 
-    headers = {
-        "Authorization":
-            f"Bearer {settings.UPSTREAM_KEY}",
-        "Content-Type":
-            "application/json",
-    }
+    upstream_url, upstream_headers, upstream_timeout = (
+        _resolve_upstream(
+            request
+        )
+    )
 
     client = httpx.AsyncClient(
-        timeout=settings.UPSTREAM_TIMEOUT
+        timeout=upstream_timeout,
+        follow_redirects=False,
     )
 
     try:
 
         upstream_req = client.build_request(
             "POST",
-            (
-                f"{settings.UPSTREAM_URL}"
-                "/v1/chat/completions"
-            ),
+            upstream_url,
             json=body,
-            headers=headers,
+            headers=upstream_headers,
         )
 
         upstream_resp = (
@@ -392,6 +558,10 @@ async def chat_completions(
                 stream=True,
             )
         )
+
+    except HTTPException:
+        await client.aclose()
+        raise
 
     except Exception as exc:
 
@@ -467,6 +637,8 @@ async def chat_completions(
                     trace_id,
                 "Cache-Control":
                     "no-cache",
+                "X-Content-Type-Options":
+                    "nosniff",
             },
         )
 
@@ -535,6 +707,8 @@ async def chat_completions(
                 headers={
                     "X-Trace-Id":
                         trace_id,
+                    "X-Content-Type-Options":
+                        "nosniff",
                 },
             )
 
@@ -567,6 +741,8 @@ async def chat_completions(
         headers={
             "X-Trace-Id":
                 trace_id,
+            "X-Content-Type-Options":
+                "nosniff",
         },
         media_type=
             "text/event-stream",
