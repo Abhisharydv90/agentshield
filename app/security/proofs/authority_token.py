@@ -72,6 +72,14 @@ class AuthorityToken:
     ) -> "AuthorityToken":
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        if parent_token_hash is None and issuer_agent_id != subject_agent_id:
+            raise ValueError(
+                "delegated token requires parent_token_hash"
+            )
+        if parent_token_hash is not None and issuer_agent_id == subject_agent_id:
+            raise ValueError(
+                "delegated token must target a different subject"
+            )
         issued = int(time.time())
         unsigned = cls(
             token_id=uuid.uuid4(),
@@ -110,9 +118,19 @@ class AuthorityToken:
         if expected_subject_agent_id is not None and self.subject_agent_id != expected_subject_agent_id:
             return False
         if parent_token is not None:
+            if self.tenant_id != parent_token.tenant_id:
+                return False
+            if self.issuer_agent_id != parent_token.subject_agent_id:
+                return False
+            if self.subject_agent_id == self.issuer_agent_id:
+                return False
             if self.parent_token_hash != parent_token.token_hash:
                 return False
-            if not self.authority.to_dict()["capabilities"]:
+            if self.issued_at < parent_token.issued_at:
+                return False
+            if self.expires_at > parent_token.expires_at:
+                return False
+            if not self.authority.capabilities:
                 return False
         return verify_signature(
             public_key_b64,
