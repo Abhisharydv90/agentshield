@@ -212,16 +212,34 @@ async def run_isolated(request: Request, body: IsolationRunInput) -> dict[str, A
 
 
 @router.get("/runs/{execution_id}")
-async def get_run(execution_id: str) -> dict[str, Any]:
-    result = await get_isolation_runner().get(execution_id)
+async def get_run(
+    request: Request,
+    execution_id: str,
+) -> dict[str, Any]:
+    context = _security_context(request)
+    result = await get_isolation_runner().get(
+        execution_id,
+        context=context,
+    )
     if result is None:
+        # Deliberately return 404 for both unknown and non-owned executions
+        # to prevent execution-id enumeration across agents.
         raise HTTPException(status_code=404, detail="isolation_run_not_found")
     return result.to_dict()
 
 
 @router.post("/runs/{execution_id}/stop")
-async def stop_run(execution_id: str) -> dict[str, Any]:
-    stopped = await get_isolation_runner().stop(execution_id)
+async def stop_run(
+    request: Request,
+    execution_id: str,
+) -> dict[str, Any]:
+    context = _security_context(request)
+    stopped = await get_isolation_runner().stop(
+        execution_id,
+        context=context,
+    )
     if not stopped:
+        # Do not disclose whether the execution exists for another
+        # tenant/agent, or whether it is simply no longer active.
         raise HTTPException(status_code=404, detail="isolation_run_not_active")
     return {"execution_id": execution_id, "stopped": True}
