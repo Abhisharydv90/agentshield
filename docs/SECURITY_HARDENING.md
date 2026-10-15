@@ -18,8 +18,8 @@ Signed authority context is propagated into both streaming and non-streaming out
 
 ## P1 — high-priority data and policy hardening
 
-- Telemetry endpoints require an active human tenant session and never expose evaluator reasoning.
-- Evidence endpoints likewise require an active human tenant session; API-key/dev-fallback principals cannot read the forensic surface.
+- Telemetry endpoints remain tenant-scoped and never expose evaluator reasoning.
+- Evidence endpoints require an active human tenant session; API-key/dev-fallback principals cannot read the forensic surface.
 - Approval payload persistence redacts credential keys plus common PII values recursively.
 - Policy rule inputs use a controlled operation/decision vocabulary.
 - A tenant can have only one active policy; activation is serialized by application logic and a database partial unique index.
