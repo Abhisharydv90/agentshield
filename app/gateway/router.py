@@ -527,6 +527,7 @@ async def dispatch(
                 agent_id=str(
                     agent.agent_id
                 ),
+                agent_scopes=agent.scopes or [],
                 payload=body.payload,
             )
 
@@ -589,6 +590,7 @@ async def dispatch(
                     agent.agent_id
                 ),
                 trace_id=trace_id,
+                agent_scopes=agent.scopes or [],
                 payload=body.payload,
             )
 
