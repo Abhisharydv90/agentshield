@@ -12,7 +12,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from app.config import settings
 from app.db.models import Agent, AgentIdentity
+from app.security.capabilities import Capability
 from app.security.context import SecurityContext
 from app.security.delegation.conservation import AuthorityConservationEngine
 from app.security.delegation.model import AuthorityState
@@ -55,13 +57,18 @@ class SecurityKernel:
     @staticmethod
     def agent_base_authority(agent: Agent) -> AuthorityState:
         """Convert the legacy capability list into the Phase 4 authority ceiling."""
+        configured_delegation_depth = (
+            settings.AUTHORITY_MAX_DELEGATION_DEPTH
+            if Capability.AGENT_DELEGATE.value in (agent.scopes or [])
+            else 0
+        )
         return AuthorityState.from_values(
             capabilities=agent.scopes or [],
             operations={"read", "write", "delete", "execute", "external_call"},
             resources=(),
             data_scopes=(),
             network_scopes=(),
-            delegation_depth=0,
+            delegation_depth=configured_delegation_depth,
             risk_ceiling=100.0,
         )
 
@@ -140,6 +147,16 @@ class SecurityKernel:
                     raise AuthorityDeniedError("authority_token_issuer_not_parent_subject")
                 if "agent:delegate" not in previous.authority.capabilities:
                     raise AuthorityDeniedError("parent_authority_cannot_delegate")
+                if previous.authority.delegation_depth <= 0:
+                    raise AuthorityDeniedError(
+                        "parent_authority_delegation_depth_exhausted"
+                    )
+
+                max_child_depth = previous.authority.delegation_depth - 1
+                if current.authority.delegation_depth > max_child_depth:
+                    raise AuthorityDeniedError(
+                        "authority_token_exceeds_parent_delegation_depth"
+                    )
 
                 conservation = self.conservation.compare(
                     previous.authority,
@@ -158,6 +175,14 @@ class SecurityKernel:
         final = token_chain[-1]
         if final.subject_agent_id != target_agent.agent_id:
             raise AuthorityDeniedError("authority_token_subject_mismatch")
+
+        target_ceiling = self.agent_base_authority(target_agent)
+        target_conservation = self.conservation.compare(
+            target_ceiling,
+            final.authority,
+        )
+        if not target_conservation.allowed:
+            raise AuthorityDeniedError("authority_token_exceeds_subject_ceiling")
 
         return SecurityContext.from_token(
             token=final,
