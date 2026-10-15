@@ -49,6 +49,12 @@ PERMISSIONS: dict[str, set[Role]] = {
         Role.MEMBER,
     },
 
+    "tenant.telemetry.read": {
+        Role.OWNER,
+        Role.ADMIN,
+        Role.MEMBER,
+    },
+
     # --------------------------------------------------------
     # Tenant settings
     # --------------------------------------------------------
