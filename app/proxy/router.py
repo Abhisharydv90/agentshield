@@ -280,6 +280,16 @@ async def _bind_presented_authority(
     if not raw_chain and not raw_token:
         return None
 
+    max_header_bytes = 64 * 1024
+    if (
+        (raw_chain is not None and len(raw_chain.encode("utf-8")) > max_header_bytes)
+        or (raw_token is not None and len(raw_token.encode("utf-8")) > max_header_bytes)
+    ):
+        raise HTTPException(
+            status_code=431,
+            detail="authority_header_too_large",
+        )
+
     import json
 
     try:
@@ -287,6 +297,8 @@ async def _bind_presented_authority(
             payload = json.loads(raw_chain)
             if not isinstance(payload, list) or not payload:
                 raise ValueError("authority chain must be a non-empty list")
+            if len(payload) > settings.AUTHORITY_MAX_TOKEN_CHAIN_LENGTH:
+                raise ValueError("authority chain too long")
             token_chain = [
                 AuthorityToken.from_dict(item)
                 for item in payload
