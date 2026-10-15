@@ -934,10 +934,7 @@ async def execute_tool_with_judge(
             decision="deny",
             risk=1.0,
             category="other",
-            reason=(
-                "judge_failure_failclosed:"
-                f"{str(exc)[:100]}"
-            ),
+            reason="judge_failure_failclosed",
             policy_version=(
                 policy_version
             ),
