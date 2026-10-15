@@ -726,6 +726,8 @@ async def chat_completions(
                             agent_id,
                         approval_id=
                             approval_id,
+                        authority_context=
+                            authority_context,
                     )
                 )
 
