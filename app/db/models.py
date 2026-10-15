@@ -1194,6 +1194,13 @@ Index(
 )
 
 Index(
+    "uq_policies_tenant_active",
+    Policy.tenant_id,
+    unique=True,
+    postgresql_where=Policy.active.is_(True),
+)
+
+Index(
     "ix_auth_tokens_user_kind_active",
     AuthToken.user_id,
     AuthToken.kind,
