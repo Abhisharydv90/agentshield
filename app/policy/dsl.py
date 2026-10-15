@@ -3,12 +3,12 @@ from typing import Literal, Optional
 
 
 class ToolRule(BaseModel):
-    tool_pattern: str
+    tool_pattern: str = Field(min_length=1, max_length=120)
     op: Optional[Literal[
         "read", "write", "delete", "execute", "external_call", "unknown"
     ]] = None
-    target_allowlist: list[str] = Field(default_factory=list)
-    target_denylist: list[str] = Field(default_factory=list)
+    target_allowlist: list[str] = Field(default_factory=list, max_length=100)
+    target_denylist: list[str] = Field(default_factory=list, max_length=100)
     max_rows: Optional[int] = Field(default=None, ge=1)
     require_human_approval: bool = False
     decision: Literal["allow", "deny", "step_up"] = "deny"
