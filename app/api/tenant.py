@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ipaddress
 import secrets as _secrets
+import socket
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -1007,6 +1008,7 @@ class PolicyCreate(BaseModel):
 
     version: str = Field(
         default="1.0.0",
+        min_length=1,
         max_length=20,
     )
 
@@ -1032,6 +1034,7 @@ class PolicyPatch(BaseModel):
 
     version: str | None = Field(
         default=None,
+        min_length=1,
         max_length=20,
     )
 
@@ -1338,6 +1341,12 @@ def _validate_webhook_url(value: str) -> str:
         address = ipaddress.ip_address(hostname)
     except ValueError:
         address = None
+        try:
+            # inet_aton accepts legacy integer/hex/octal IPv4 spellings that
+            # modern URL parsers may still treat as loopback/private targets.
+            address = ipaddress.ip_address(socket.inet_aton(hostname))
+        except (OSError, ValueError):
+            address = None
 
     if address is not None and (
         address.is_private
