@@ -14,6 +14,8 @@ from app.api.tenant import _validate_webhook_url
         "http://10.0.0.10/hook",
         "http://169.254.169.254/latest/meta-data/",
         "http://[::1]/hook",
+        "http://2130706433/hook",
+        "http://0x7f000001/hook",
     ],
 )
 def test_webhook_destination_rejects_unsafe_urls(url):
