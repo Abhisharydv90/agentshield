@@ -29,7 +29,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import IntegrityError, select, update
 
-from app.config import settings as _settings\nfrom app.db.models import (
+from app.config import settings as _settings
+from app.db.models import (
     APIKey,
     Agent,
     Policy,
