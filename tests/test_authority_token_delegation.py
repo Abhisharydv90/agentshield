@@ -314,7 +314,7 @@ def test_final_subject_authority_cannot_exceed_subject_ceiling():
         issuer_agent_id=parent_id,
         subject_agent_id=parent_id,
         authority=AuthorityState.from_values(
-            capabilities={"agent:delegate", "agent:invoke", "tool:read"},
+            capabilities={"agent:delegate", "agent:invoke", "tool:read", "tool:execute"},
             operations={"read"},
             delegation_depth=1,
         ),
