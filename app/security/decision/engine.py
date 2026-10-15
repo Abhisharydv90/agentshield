@@ -17,6 +17,7 @@ runtime.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -41,6 +42,11 @@ from app.security.evidence.binding import (
     capability_snapshot_hash,
     decision_snapshot_hash,
 )
+
+
+_EMAIL_PATTERN = re.compile(r"(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
+_SSN_PATTERN = re.compile(r"\\b\\d{3}-\\d{2}-\\d{4}\\b")
+_CARD_PATTERN = re.compile(r"(?<!\\d)(?:\\d[ -]?){13,19}(?!\\d)")
 
 
 _SENSITIVE_KEY_MARKERS = (
@@ -78,6 +84,11 @@ def _redact_approval_value(value: Any, key: str | None = None) -> Any:
         return [_redact_approval_value(v, None) for v in value]
     if isinstance(value, tuple):
         return [_redact_approval_value(v, None) for v in value]
+    if isinstance(value, str):
+        redacted = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", value)
+        redacted = _SSN_PATTERN.sub("[REDACTED_SSN]", redacted)
+        redacted = _CARD_PATTERN.sub("[REDACTED_CARD]", redacted)
+        return redacted
     return value
 
 
