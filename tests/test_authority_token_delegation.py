@@ -296,3 +296,87 @@ def test_single_self_issued_token_still_works():
     )
 
     assert context.agent_id == agent_id
+
+
+def test_delegated_capability_ceiling_is_part_of_action_identity():
+    from app.security.decision.contract import SecurityAction
+
+    tenant = uuid.uuid4()
+    agent = uuid.uuid4()
+
+    action = SecurityAction(
+        tenant_id=tenant,
+        agent_id=agent,
+        trace_id="trace",
+        tool_name="email.send",
+        operation="external_call",
+        target="example.com",
+        arguments={"to": "user@example.com"},
+        capabilities=["tool:execute"],
+        policy_version="1",
+        policy_hash="a" * 64,
+        capability_snapshot_hash="b" * 64,
+        effective_capabilities=["tool:execute"],
+        authority_token_hash="c" * 64,
+    )
+
+    payload = action.to_dict()
+    assert payload["effective_capabilities"] == ["tool:execute"]
+    assert payload["authority_token_hash"] == "c" * 64
+
+
+def test_authority_token_chain_rejects_parent_hash_mismatch():
+    tenant = uuid.uuid4()
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    pair = IdentityKeyPair.generate()
+    policy_hash = _policy_hash()
+
+    parent_agent = _agent(
+        tenant,
+        parent_id,
+        ["agent:delegate", "agent:invoke", "tool:read"],
+    )
+    child_agent = _agent(
+        tenant,
+        child_id,
+        ["agent:invoke", "tool:read"],
+    )
+
+    root = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=parent_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:delegate", "agent:invoke", "tool:read"},
+            operations={"read"},
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=300,
+    )
+    child = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=child_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:invoke", "tool:read"},
+            operations={"read"},
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=240,
+        parent_token_hash="d" * 64,
+    )
+
+    with pytest.raises(AuthorityDeniedError, match="signature_or_chain_invalid"):
+        SecurityKernel().validate_authority_chain(
+            token_chain=(root, child),
+            target_agent=child_agent,
+            issuer_identities={
+                parent_id: _identity(tenant, parent_id, pair),
+            },
+            issuer_agents={parent_id: parent_agent},
+            expected_policy_hash=policy_hash,
+            trace_id="trace",
+        )
