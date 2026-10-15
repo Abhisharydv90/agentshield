@@ -25,7 +25,6 @@ from app.db.session import async_session
 from app.api.evidence import router as evidence_router
 from app.security.authorization import require_permission
 from app.telemetry.audit import verify_chain
-from app.api.evidence import router as evidence_router
 
 
 router = APIRouter(
@@ -158,7 +157,7 @@ async def get_events(
     limit: int = 50,
 ):
 
-    tenant = _require_tenant(
+    tenant = _require_human_telemetry_access(
         request
     )
 
