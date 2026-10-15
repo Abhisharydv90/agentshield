@@ -9,7 +9,7 @@ class ToolRule(BaseModel):
     ]] = None
     target_allowlist: list[str] = Field(default_factory=list)
     target_denylist: list[str] = Field(default_factory=list)
-    max_rows: Optional[int] = None
+    max_rows: Optional[int] = Field(default=None, ge=1)
     require_human_approval: bool = False
     decision: Literal["allow", "deny", "step_up"] = "deny"
 
@@ -20,6 +20,14 @@ class Policy(BaseModel):
     default: Literal["allow", "deny"] = "deny"
     rules: list[ToolRule]
     notes: str = ""
+
+
+NO_ACTIVE_POLICY = Policy(
+    name="no-active-policy",
+    version="0",
+    default="deny",
+    rules=[ToolRule(tool_pattern="*", decision="deny")],
+)
 
 
 EXAMPLE_POLICY = Policy(

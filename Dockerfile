@@ -26,6 +26,11 @@ COPY app ./app
 COPY alembic.ini .
 COPY scripts ./scripts
 
+# Drop root privileges for the application runtime.
+RUN addgroup --system agentshield && adduser --system --ingroup agentshield agentshield \
+    && chown -R agentshield:agentshield /app
+USER agentshield
+
 # Expose port Railway expects
 EXPOSE 8000
 

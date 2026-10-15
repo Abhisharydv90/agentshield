@@ -1,0 +1,66 @@
+{
+  "phase": "15",
+  "name": "Research / Invention",
+  "status": "implementation-complete",
+  "umbrella": "AURAGENT",
+  "component": "AgentShield",
+  "database_migration": false,
+  "shared_files_rewritten": false,
+  "dynamic_router_expected": "app.api.research",
+  "research_hypothesis": {
+    "name": "Authority-Carrying Agents + Authority Conservation Engine",
+    "status": "research_hypothesis",
+    "novelty_or_patentability_claim": false,
+    "core_invariant": "A_child <= A_parent unless explicitly authorized",
+    "separation": [
+      "identity != authority",
+      "authority != influence",
+      "influence != evidence",
+      "memory != authority"
+    ]
+  },
+  "scope": [
+    "authority-vector conservation checking",
+    "provenance-conditioned authorization",
+    "trusted-memory assessment",
+    "deterministic decision proofs",
+    "bounded formal policy verification",
+    "non-executable containment plans",
+    "research evaluation engine",
+    "research API",
+    "research dashboard client"
+  ],
+  "production_boundary": [
+    "Phase 15 does not replace Phase 4 Trust Kernel authority decisions.",
+    "Decision proofs are evidence, not authority tokens.",
+    "Containment plans are non-executable by default.",
+    "Formal verification is bounded and model-based, not a universal theorem.",
+    "Memory trust never creates or increases authority.",
+    "Raw model chain-of-thought is never stored or returned."
+  ],
+  "later_research": [
+    "cryptographic provenance-conditioned capability tokens",
+    "proof-carrying delegation",
+    "trusted-memory attestation",
+    "distributed authority conservation",
+    "policy synthesis",
+    "machine-checkable containment safety",
+    "authority-aware A2A protocols"
+  ],
+  "files": [
+    "app/research/__init__.py",
+    "app/research/contracts.py",
+    "app/research/aca.py",
+    "app/research/provenance_guard.py",
+    "app/research/memory_trust.py",
+    "app/research/formal_policy.py",
+    "app/research/decision_proof.py",
+    "app/research/containment.py",
+    "app/research/research_engine.py",
+    "app/api/research.py",
+    "dashboard/lib/research-client.ts",
+    "tests/test_phase15_research.py",
+    "PHASE15_MANIFEST.json",
+    "PHASE15_README.md"
+  ]
+}

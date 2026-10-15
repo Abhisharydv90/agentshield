@@ -1,0 +1,53 @@
+{
+  "phase": "6",
+  "name": "AURAGENT Memory Fabric",
+  "base_alembic_head": "f4a7b9c1d2e3",
+  "new_alembic_revision": "f6c8d1a4e7b9",
+  "scope": [
+    "durable memory store",
+    "memory types",
+    "source verification",
+    "integrity hashing",
+    "memory versioning",
+    "retention",
+    "semantic retrieval",
+    "memory provenance lineage",
+    "memory poisoning defense",
+    "tenant isolation",
+    "Phase 4 SecurityContext enforcement",
+    "Phase 5 Tool Fabric compatibility"
+  ],
+  "files": [
+    "app/memory/__init__.py",
+    "app/memory/models.py",
+    "app/memory/versioning.py",
+    "app/memory/store.py",
+    "app/memory/retention.py",
+    "app/memory/semantic/index.py",
+    "app/memory/semantic/retrieval.py",
+    "app/memory/provenance/source.py",
+    "app/memory/provenance/lineage.py",
+    "app/memory/security/validation.py",
+    "app/memory/security/poisoning.py",
+    "app/db/memory_models.py",
+    "app/db/migrations/env.py",
+    "app/db/migrations/versions/f6c8d1a4e7b9_add_memory_fabric.py",
+    "app/api/memory.py",
+    "app/main.py",
+    "app/proxy/router.py",
+    "tests/test_phase6_memory_fabric.py"
+  ],
+  "security_invariants": [
+    "memory never grants authority",
+    "memory never mutates SecurityContext",
+    "tenant scope is mandatory",
+    "memory read requires memory:read",
+    "memory write/delete requires memory:write",
+    "content hash is checked before retrieval",
+    "suspicious memory is rejected or quarantined",
+    "source verification does not imply authority",
+    "version updates use optimistic concurrency",
+    "lineage is hash chained"
+  ],
+  "build_policy": "Implementation and syntax validation first; comprehensive integration testing at final AURAGENT verification phase."
+}

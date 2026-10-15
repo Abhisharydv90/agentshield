@@ -1,0 +1,55 @@
+{
+  "phase": "11",
+  "name": "Control Plane",
+  "status": "implementation-complete",
+  "umbrella": "AURAGENT",
+  "component": "AgentShield",
+  "database_migration": false,
+  "shared_files_rewritten": false,
+  "dynamic_router_expected": "app.api.control_plane",
+  "capabilities": [
+    "organization administration",
+    "persistent logical project lifecycle in existing TenantSettings JSON",
+    "explicit RBAC",
+    "deny-by-default ABAC",
+    "tenant configuration with immutable security keys",
+    "API-key inventory without key material",
+    "bounded provider-neutral usage accounting"
+  ],
+  "security_invariants": [
+    "tenant scope is resolved server-side",
+    "control-plane access never creates or increases agent authority",
+    "secret material is never returned",
+    "identity != authority != influence != evidence",
+    "configuration cannot change the authority model through this API",
+    "reserved project state is not directly patchable through configuration API"
+  ],
+  "files": [
+    "app/control_plane/__init__.py",
+    "app/control_plane/contracts.py",
+    "app/control_plane/rbac.py",
+    "app/control_plane/abac.py",
+    "app/control_plane/config.py",
+    "app/control_plane/projects.py",
+    "app/control_plane/api_management.py",
+    "app/control_plane/usage.py",
+    "app/control_plane/repository.py",
+    "app/control_plane/service.py",
+    "app/api/control_plane.py",
+    "dashboard/lib/control-plane-client.ts",
+    "tests/test_phase11_control_plane.py",
+    "PHASE11_MANIFEST.json",
+    "PHASE11_README.md"
+  ],
+  "depends_on": [
+    "Phase 4 Trust & Security Kernel",
+    "Phase 8 Evidence Fabric",
+    "Phase 10 Investigation Platform"
+  ],
+  "later_consumers": [
+    "Phase 12 Ecosystem",
+    "Phase 13 Scale",
+    "Phase 14 Enterprise",
+    "Phase 15 Research"
+  ]
+}

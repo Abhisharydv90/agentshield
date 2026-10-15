@@ -14,11 +14,16 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     String,
     Integer,
+    Float,
     Boolean,
     DateTime,
     Text,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
+    UniqueConstraint,
+    CheckConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -45,11 +50,15 @@ class Tenant(Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(
-        String(20), default="active", nullable=False
-    )  # active | suspended | deleted
+        String(20),
+        default="active",
+        server_default="active",
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
+        server_default=text("now()"),
         nullable=False,
     )
 
@@ -76,12 +85,18 @@ class APIKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
+        server_default=text("now()"),
         nullable=False,
     )
     last_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    revoked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
 
 
 # ============================================================
@@ -91,7 +106,7 @@ class APIKey(Base):
 class User(Base):
     """
     A human user belonging to a tenant.
-    One tenant can have multiple users (future: teams).
+    One tenant can have multiple users.
     """
 
     __tablename__ = "users"
@@ -106,15 +121,29 @@ class User(Base):
         index=True,
     )
     email: Mapped[str] = mapped_column(
-        String(255), unique=True, nullable=False, index=True
+        String(255),
+        unique=True,
+        nullable=False,
+        index=True,
     )
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    password_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        default="",
+    )
     role: Mapped[str] = mapped_column(
-        String(20), default="owner", nullable=False
-    )  # owner | admin | member
+        String(20),
+        default="owner",
+        nullable=False,
+    )
     email_verified: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
+        Boolean,
+        default=False,
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -122,28 +151,38 @@ class User(Base):
         nullable=False,
     )
     last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True),
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(
-        String(20), default="active", nullable=False
+        String(20),
+        default="active",
+        nullable=False,
     )
 
-    # --- Brute-force lockout (added for auth hardening) ---
     failed_login_attempts: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0", nullable=False
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
     )
+
     locked_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    session_version: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
     )
 
 
 class TOTPCredential(Base):
     """
     TOTP secret + recovery codes for a user.
-
-    A row exists as soon as setup begins. The row is only "active" once
-    verified_at is populated. Recovery codes are stored as SHA-256 hashes —
-    never in plaintext. Each is consumed on use.
     """
 
     __tablename__ = "totp_credentials"
@@ -153,12 +192,18 @@ class TOTPCredential(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    secret: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
     recovery_codes_hash: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=list
+        JSONB,
+        nullable=False,
+        default=list,
     )
     verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -170,7 +215,6 @@ class TOTPCredential(Base):
 class TenantSettings(Base):
     """
     Gateway-level settings for a tenant.
-    One row per tenant. Created lazily on first read.
     """
 
     __tablename__ = "tenant_settings"
@@ -181,19 +225,29 @@ class TenantSettings(Base):
         primary_key=True,
     )
     inbound_scanner_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
+        Boolean,
+        default=True,
+        nullable=False,
     )
     pii_redaction_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
+        Boolean,
+        default=True,
+        nullable=False,
     )
     judge_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
+        Boolean,
+        default=True,
+        nullable=False,
     )
     alert_sounds: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
+        Boolean,
+        default=False,
+        nullable=False,
     )
     email_alerts: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
+        Boolean,
+        default=False,
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -203,18 +257,23 @@ class TenantSettings(Base):
     )
 
 
+# ============================================================
+# Agent identities
+# ============================================================
+
 class Agent(Base):
     """
     An AI agent identity belonging to a tenant.
 
-    Distinct from APIKey — an agent is a *who* (identity with scopes),
-    an API key is a *how* (credential). One agent typically uses one key.
+    Distinct from APIKey — an agent is a *who*, an API key is a *how*.
     """
 
     __tablename__ = "agents"
 
     agent_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -222,12 +281,25 @@ class Agent(Base):
         nullable=False,
         index=True,
     )
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
-    scopes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    name: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+    description: Mapped[str] = mapped_column(
+        String(500),
+        default="",
+        nullable=False,
+    )
+    scopes: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
     status: Mapped[str] = mapped_column(
-        String(20), default="active", nullable=False
-    )  # active | suspended | revoked
+        String(20),
+        default="active",
+        nullable=False,
+    )
     api_key_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("api_keys.key_id", ondelete="SET NULL"),
@@ -239,31 +311,229 @@ class Agent(Base):
         nullable=False,
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True),
+        nullable=True,
     )
 
 
+# ============================================================
+# Phase 4 — cryptographic agent identity
+# ============================================================
+
+class AgentIdentity(Base):
+    """
+    Public cryptographic identity bound to exactly one tenant + agent.
+
+    Private keys are never stored in AURAGENT. This record contains only
+    public material required to verify agent-signed credentials/tokens.
+    """
+
+    __tablename__ = "agent_identities"
+
+    identity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.agent_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    key_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+    algorithm: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="Ed25519",
+    )
+    public_key: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    fingerprint: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="active",
+        index=True,
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "agent_id",
+            name="uq_agent_identities_tenant_agent",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "fingerprint",
+            name="uq_agent_identities_tenant_fingerprint",
+        ),
+    )
+
+
+# ============================================================
+# Persisted human approval state
+# ============================================================
+
+class ApprovalRequest(Base):
+    """
+    Durable one-time authorization request for a high-risk agent action.
+
+    The complete action payload and its SHA-256 fingerprint are stored
+    together so an approval cannot be detached from the exact action
+    that was originally presented to the human.
+
+    state:
+        pending
+        approved
+        denied
+        expired
+        consumed
+    """
+
+    __tablename__ = "approval_requests"
+
+    approval_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.agent_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    trace_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        index=True,
+    )
+
+    action_fingerprint: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    action_payload: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+
+    policy_version: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    policy_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    capability_snapshot_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    decision_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    state: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+        index=True,
+    )
+
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    decision_reason: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+
+# ============================================================
+# Policies
+# ============================================================
+
 class Policy(Base):
     """
-    A tenant's rule set evaluated by the deterministic policy engine
-    before the LLM Judge is invoked.
-
-    Rules are stored as JSONB — the shape is:
-        [
-          {
-            "tool_pattern": "db.*",
-            "op": "read" | "write" | "delete" | "execute" | null,
-            "target_allowlist": ["billing_*"],
-            "target_denylist": ["users"],
-            "decision": "allow" | "deny" | "step_up"
-          }
-        ]
+    A tenant's rule set evaluated by the deterministic policy engine.
     """
 
     __tablename__ = "policies"
 
     policy_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -271,11 +541,30 @@ class Policy(Base):
         nullable=False,
         index=True,
     )
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
-    version: Mapped[str] = mapped_column(String(20), default="1.0.0", nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    rules: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    name: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+    description: Mapped[str] = mapped_column(
+        String(500),
+        default="",
+        nullable=False,
+    )
+    version: Mapped[str] = mapped_column(
+        String(20),
+        default="1.0.0",
+        nullable=False,
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    rules: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -289,20 +578,21 @@ class Policy(Base):
     )
 
 
+# ============================================================
+# Webhooks
+# ============================================================
+
 class Webhook(Base):
     """
-    An outbound HTTP webhook. AgentShield POSTs a signed JSON payload
-    to `url` when any event in `events` fires for this tenant.
-
-    The `secret` is used to compute an HMAC-SHA256 signature sent as
-    `X-AgentShield-Signature`. Receivers verify it to authenticate
-    the payload.
+    An outbound HTTP webhook.
     """
 
     __tablename__ = "webhooks"
 
     webhook_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -310,11 +600,29 @@ class Webhook(Base):
         nullable=False,
         index=True,
     )
-    url: Mapped[str] = mapped_column(String(500), nullable=False)
-    description: Mapped[str] = mapped_column(String(200), default="", nullable=False)
-    events: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
-    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    secret: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+    )
+    description: Mapped[str] = mapped_column(
+        String(200),
+        default="",
+        nullable=False,
+    )
+    events: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+    secret: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -329,23 +637,20 @@ class Webhook(Base):
 
 
 # ============================================================
-# Auth tokens (password reset + email verification)
+# Auth tokens
 # ============================================================
 
 class AuthToken(Base):
     """
     One-time tokens for password reset and email verification.
-
-    Only the SHA-256 of the raw token is stored — the plaintext is shown
-    once, in the email link, and never persisted. A row is marked `used_at`
-    on consumption and a fresh one is issued on resend, so tokens are
-    single-use with an absolute expiry.
     """
 
     __tablename__ = "auth_tokens"
 
     token_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -353,19 +658,29 @@ class AuthToken(Base):
         nullable=False,
         index=True,
     )
-    kind: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    # kind: "password_reset" | "email_verification"
-
+    kind: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        index=True,
+    )
     token_hash: Mapped[str] = mapped_column(
-        String(64), unique=True, nullable=False, index=True
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True,
     )
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True),
+        nullable=False,
     )
     used_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True),
+        nullable=True,
     )
-    request_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_ip: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -378,11 +693,16 @@ class AuthToken(Base):
 # ============================================================
 
 class RequestLog(Base):
-    """One row per inbound request handled by the gateway."""
+    """
+    One row per inbound request handled by the gateway.
+    """
 
     __tablename__ = "requests_log"
 
-    request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
@@ -394,23 +714,265 @@ class RequestLog(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
-    agent_identity: Mapped[str] = mapped_column(String, nullable=False)
-    provider_model: Mapped[str] = mapped_column(String, nullable=False)
-    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
-    outcome: Mapped[str] = mapped_column(String, default="allowed")
+    agent_identity: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+    provider_model: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+    total_tokens: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+    latency_ms: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+    outcome: Mapped[str] = mapped_column(
+        String,
+        default="allowed",
+    )
 
+class EvidenceNode(Base):
+    """
+    Cryptographically identifiable security evidence artifact.
+
+    The payload itself is represented by artifact_hash. The optional
+    metadata_redacted field is intended only for already-redacted,
+    non-secret metadata.
+    """
+
+    __tablename__ = "evidence_nodes"
+
+    evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    trace_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        index=True,
+    )
+
+    node_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    schema_version: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="1",
+    )
+
+    artifact_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+
+    source: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    metadata_redacted: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    security_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "security_events.event_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "evidence_id",
+            name="uq_evidence_nodes_tenant_evidence",
+        ),
+    )
+
+class EvidenceEdge(Base):
+    """
+    Directed causal relationship between two evidence nodes.
+
+    Composite tenant-scoped foreign keys ensure that an edge cannot
+    connect evidence belonging to different tenants.
+    """
+
+    __tablename__ = "evidence_edges"
+
+    edge_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    trace_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        index=True,
+    )
+
+    from_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+
+    to_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+
+    relation: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "from_evidence_id",
+            ],
+            [
+                "evidence_nodes.tenant_id",
+                "evidence_nodes.evidence_id",
+            ],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "to_evidence_id",
+            ],
+            [
+                "evidence_nodes.tenant_id",
+                "evidence_nodes.evidence_id",
+            ],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "from_evidence_id",
+            "to_evidence_id",
+            "relation",
+            name="uq_evidence_edge_relationship",
+        ),
+        CheckConstraint(
+            "from_evidence_id <> to_evidence_id",
+            name="ck_evidence_edge_not_self",
+        ),
+    )
 
 class SecurityEvent(Base):
     """
-    Tamper-evident audit log. The hash chain is scoped per tenant,
-    so each tenant's chain is independent.
+    Tamper-evident audit log.
     """
 
     __tablename__ = "security_events"
 
     event_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    request_id: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+    )
+
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    threat_category: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+
+    action_taken: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+
+    evaluator_reasoning: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    prev_hash: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+    )
+
+    record_hash: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+
+
+# ============================================================
+# Phase 4 — authority grants
+# ============================================================
+
+class AuthorityGrant(Base):
+    """Durable record of bounded authority delegated from one agent to another."""
+
+    __tablename__ = "authority_grants"
+
+    grant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -418,20 +980,183 @@ class SecurityEvent(Base):
         nullable=False,
         index=True,
     )
-    request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.agent_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    child_agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.agent_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    authority: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+    parent_authority_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    nonce: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+    escalation_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    escalation_reason: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="active",
+        index=True,
+    )
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
 
-    timestamp: Mapped[datetime] = mapped_column(
+    __table_args__ = (
+        CheckConstraint(
+            "parent_agent_id <> child_agent_id",
+            name="ck_authority_grant_not_self",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "parent_agent_id",
+            "child_agent_id",
+            "nonce",
+            name="uq_authority_grant_nonce",
+        ),
+    )
+
+
+# ============================================================
+# Phase 4 — machine-verifiable decision proofs
+# ============================================================
+
+class DecisionProof(Base):
+    """Durable signed proof binding action, policy, authority and outcome."""
+
+    __tablename__ = "decision_proofs"
+
+    proof_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.agent_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    trace_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        index=True,
+    )
+    decision: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+    )
+    action_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    policy_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    capability_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    authority_token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("approval_requests.approval_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    risk_score: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0,
+    )
+    evidence_root: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        index=True,
     )
-    threat_category: Mapped[str] = mapped_column(String, nullable=False)
-    action_taken: Mapped[str] = mapped_column(String, nullable=False)
-    evaluator_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Hash chain — prev_hash links to the previous event for THIS tenant
-    prev_hash: Mapped[str | None] = mapped_column(String, nullable=True)
-    record_hash: Mapped[str] = mapped_column(String, nullable=False)
+    signer_key_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    algorithm: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="Ed25519",
+    )
+    signature: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+    )
+    proof_payload: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    proof_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
 
 
 # ============================================================
@@ -443,29 +1168,109 @@ Index(
     SecurityEvent.tenant_id,
     SecurityEvent.timestamp.desc(),
 )
+
 Index(
     "ix_security_events_tenant_threat",
     SecurityEvent.tenant_id,
     SecurityEvent.threat_category,
 )
+
 Index(
     "ix_requests_log_tenant_time",
     RequestLog.tenant_id,
     RequestLog.timestamp.desc(),
 )
+
 Index(
     "ix_api_keys_tenant_active",
     APIKey.tenant_id,
     APIKey.revoked,
 )
+
 Index(
     "ix_webhooks_tenant_active",
     Webhook.tenant_id,
     Webhook.active,
 )
+
 Index(
     "ix_auth_tokens_user_kind_active",
     AuthToken.user_id,
     AuthToken.kind,
     AuthToken.used_at,
+)
+
+Index(
+    "ix_approval_requests_tenant_state",
+    ApprovalRequest.tenant_id,
+    ApprovalRequest.state,
+    ApprovalRequest.expires_at,
+)
+
+Index(
+    "ix_approval_requests_agent_time",
+    ApprovalRequest.agent_id,
+    ApprovalRequest.requested_at.desc(),
+)
+
+Index(
+    "ix_evidence_nodes_tenant_trace",
+    EvidenceNode.tenant_id,
+    EvidenceNode.trace_id,
+)
+
+Index(
+    "ix_evidence_nodes_tenant_type_time",
+    EvidenceNode.tenant_id,
+    EvidenceNode.node_type,
+    EvidenceNode.created_at.desc(),
+)
+
+Index(
+    "ix_evidence_edges_tenant_trace",
+    EvidenceEdge.tenant_id,
+    EvidenceEdge.trace_id,
+)
+
+Index(
+    "ix_evidence_edges_from",
+    EvidenceEdge.tenant_id,
+    EvidenceEdge.from_evidence_id,
+)
+
+Index(
+    "ix_evidence_edges_to",
+    EvidenceEdge.tenant_id,
+    EvidenceEdge.to_evidence_id,
+)
+
+Index(
+    "uq_agents_api_key_id",
+    Agent.api_key_id,
+    unique=True,
+    postgresql_where=Agent.api_key_id.is_not(None),
+)
+
+Index(
+    "ix_agent_identities_tenant_status",
+    AgentIdentity.tenant_id,
+    AgentIdentity.status,
+)
+
+Index(
+    "ix_authority_grants_tenant_expires",
+    AuthorityGrant.tenant_id,
+    AuthorityGrant.expires_at,
+)
+
+Index(
+    "ix_authority_grants_child_active",
+    AuthorityGrant.child_agent_id,
+    AuthorityGrant.status,
+)
+
+Index(
+    "ix_decision_proofs_tenant_time",
+    DecisionProof.tenant_id,
+    DecisionProof.created_at.desc(),
 )

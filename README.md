@@ -239,7 +239,7 @@ agentshield/
 **Backend → Railway**
 
 1. Connect GitHub repo
-2. Set env vars: `DATABASE_URL`, `REDIS_URL`, `JUDGE_KEY`, `UPSTREAM_KEY`, `SECRET_KEY`, `ENV=prod`
+2. Set env vars: `DATABASE_URL`, `REDIS_URL` (`rediss://...`), `JUDGE_KEY`, `UPSTREAM_KEY`, `SECRET_KEY`, `ENV=prod`, `TRUSTED_HOSTS`, `CORS_ORIGINS`
 3. Railway detects `Dockerfile` and deploys
 
 **Frontend → Vercel**
