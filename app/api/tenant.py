@@ -27,9 +27,9 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import IntegrityError, select, update
 
-from app.db.models import (
+from app.config import settings as _settings\nfrom app.db.models import (
     APIKey,
     Agent,
     Policy,
@@ -966,17 +966,30 @@ class PolicyRule(BaseModel):
         max_length=120,
     )
 
-    op: str | None = None
+    op: Literal[
+        "read",
+        "write",
+        "delete",
+        "execute",
+        "external_call",
+        "unknown",
+    ] | None = None
 
     target_allowlist: list[str] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=100,
     )
 
     target_denylist: list[str] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=100,
     )
 
-    decision: str = "deny"
+    decision: Literal[
+        "allow",
+        "deny",
+        "step_up",
+    ] = "deny"
 
 
 class PolicyCreate(BaseModel):
@@ -1103,6 +1116,18 @@ async def create_policy(
 
     async with async_session() as session:
 
+        if req.active:
+            await session.execute(
+                update(Policy)
+                .where(
+                    Policy.tenant_id == tenant.tenant_id
+                )
+                .where(
+                    Policy.active.is_(True)
+                )
+                .values(active=False)
+            )
+
         policy = Policy(
             tenant_id=tenant.tenant_id,
             name=req.name.strip(),
@@ -1119,7 +1144,14 @@ async def create_policy(
             policy
         )
 
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="policy_activation_conflict",
+            ) from exc
 
         await session.refresh(
             policy
@@ -1186,6 +1218,21 @@ async def update_policy(
                     detail="policy_version_must_change_when_rules_change",
                 )
 
+        if data.get("active") is True:
+            await session.execute(
+                update(Policy)
+                .where(
+                    Policy.tenant_id == tenant.tenant_id
+                )
+                .where(
+                    Policy.active.is_(True)
+                )
+                .where(
+                    Policy.policy_id != policy.policy_id
+                )
+                .values(active=False)
+            )
+
         for (
             field,
             value,
@@ -1197,7 +1244,14 @@ async def update_policy(
                 value,
             )
 
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="policy_activation_conflict",
+            ) from exc
 
         await session.refresh(
             policy
@@ -1267,6 +1321,9 @@ def _validate_webhook_url(value: str) -> str:
 
     if parsed.scheme not in {"https", "http"}:
         raise ValueError("webhook_url_scheme_not_allowed")
+
+    if getattr(_settings, "ENV", "dev") == "prod" and parsed.scheme != "https":
+        raise ValueError("webhook_url_https_required_in_prod")
     if parsed.username or parsed.password:
         raise ValueError("webhook_url_userinfo_not_allowed")
     if not parsed.hostname:
