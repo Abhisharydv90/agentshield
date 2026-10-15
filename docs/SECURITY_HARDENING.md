@@ -18,8 +18,9 @@ Signed authority context is propagated into both streaming and non-streaming out
 
 ## P1 — high-priority data and policy hardening
 
-- Telemetry responses no longer expose evaluator reasoning.
-- Approval payload persistence redacts credential and common PII fields recursively.
+- Telemetry endpoints require an active human tenant session and never expose evaluator reasoning.
+- Evidence endpoints likewise require an active human tenant session; API-key/dev-fallback principals cannot read the forensic surface.
+- Approval payload persistence redacts credential keys plus common PII values recursively.
 - Policy rule inputs use a controlled operation/decision vocabulary.
 - A tenant can have only one active policy; activation is serialized by application logic and a database partial unique index.
 - Production webhook destinations require HTTPS and reject private/loopback targets, including alternate numeric IPv4 spellings.
@@ -27,9 +28,13 @@ Signed authority context is propagated into both streaming and non-streaming out
 ## P2 — operational hardening
 
 - Production startup fails closed when PostgreSQL, the durable security control-plane dependency, is unavailable.
+- Isolation uses explicit `isolation:execute` and `device:use` capabilities rather than ad-hoc capability strings.
+- Browser navigation rejects localhost/private/link-local/reserved targets and alternate numeric IPv4 spellings unless explicitly overridden by policy.
+- Presented authority headers are bounded by size and maximum chain length before parsing.
+- Judge/provider exception details are not returned as security decision reasons.
 - CI uses read-only repository permissions.
 - CI compiles application/test code before the test phase.
-- CI verifies that the Alembic migration graph has a head using cross-platform migration paths.
+- CI requires exactly one Alembic migration head.
 - Security regression tests are maintained alongside the affected control boundaries.
 
 ## Non-goals
