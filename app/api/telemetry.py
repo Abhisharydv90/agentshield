@@ -104,7 +104,7 @@ async def get_metrics(
         request
     )
 
-    async with async_session() as session
+    async with async_session() as session:
 
         total = await session.scalar(
             select(
