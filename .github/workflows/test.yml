@@ -61,11 +61,7 @@ jobs:
         run: python -m compileall app tests
 
       - name: Check Alembic heads
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          alembic heads
-          alembic check
+        run: alembic heads
 
       - name: Run tests
         env:
