@@ -141,6 +141,129 @@ def test_valid_two_hop_chain_is_accepted():
     assert context.authority_token_hash == child.token_hash
 
 
+
+def test_delegated_token_cannot_preserve_parent_delegation_depth():
+    tenant = uuid.uuid4()
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    pair = IdentityKeyPair.generate()
+
+    parent_agent = _agent(
+        tenant,
+        parent_id,
+        ["agent:delegate", "agent:invoke", "tool:read"],
+    )
+    child_agent = _agent(
+        tenant,
+        child_id,
+        ["agent:invoke", "tool:read"],
+    )
+    policy_hash = _policy_hash()
+
+    root = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=parent_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:delegate", "agent:invoke", "tool:read"},
+            operations={"read"},
+            delegation_depth=1,
+            risk_ceiling=80,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=300,
+    )
+    child = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=child_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:invoke", "tool:read"},
+            operations={"read"},
+            delegation_depth=1,
+            risk_ceiling=70,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=240,
+        parent_token_hash=root.token_hash,
+    )
+
+    with pytest.raises(
+        AuthorityDeniedError,
+        match="exceeds_parent_delegation_depth",
+    ):
+        SecurityKernel().validate_authority_chain(
+            token_chain=(root, child),
+            target_agent=child_agent,
+            issuer_identities={parent_id: _identity(tenant, parent_id, pair)},
+            issuer_agents={parent_id: parent_agent},
+            expected_policy_hash=policy_hash,
+            trace_id="trace",
+        )
+
+
+def test_final_subject_authority_cannot_exceed_subject_ceiling():
+    tenant = uuid.uuid4()
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    pair = IdentityKeyPair.generate()
+
+    parent_agent = _agent(
+        tenant,
+        parent_id,
+        ["agent:delegate", "agent:invoke", "tool:read", "tool:execute"],
+    )
+    child_agent = _agent(
+        tenant,
+        child_id,
+        ["agent:invoke", "tool:read"],
+    )
+    policy_hash = _policy_hash()
+
+    root = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=parent_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:delegate", "agent:invoke", "tool:read"},
+            operations={"read"},
+            delegation_depth=1,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=300,
+    )
+    child = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=child_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:invoke", "tool:read", "tool:execute"},
+            operations={"read"},
+            delegation_depth=0,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=240,
+        parent_token_hash=root.token_hash,
+    )
+
+    with pytest.raises(
+        AuthorityDeniedError,
+        match="exceeds_subject_ceiling",
+    ):
+        SecurityKernel().validate_authority_chain(
+            token_chain=(root, child),
+            target_agent=child_agent,
+            issuer_identities={parent_id: _identity(tenant, parent_id, pair)},
+            issuer_agents={parent_id: parent_agent},
+            expected_policy_hash=policy_hash,
+            trace_id="trace",
+        )
+
+
 def test_delegated_token_cannot_escalate_parent_authority():
     tenant = uuid.uuid4()
     parent_id = uuid.uuid4()
@@ -182,7 +305,7 @@ def test_delegated_token_cannot_escalate_parent_authority():
         authority=AuthorityState.from_values(
             capabilities={"agent:delegate", "agent:invoke", "tool:read"},
             operations={"read"},
-            delegation_depth=1,
+            delegation_depth=0,
             risk_ceiling=90,
         ),
         policy_hash=policy_hash,
