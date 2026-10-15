@@ -55,6 +55,14 @@ _SENSITIVE_KEY_MARKERS = (
     "private_key",
     "credential",
     "cookie",
+    "email",
+    "phone",
+    "mobile",
+    "ssn",
+    "social_security",
+    "date_of_birth",
+    "dob",
+    "address",
 )
 
 
