@@ -51,39 +51,6 @@ def _require_tenant(
     return tenant
 
 
-def _require_human_telemetry_access(
-    request: Request,
-):
-    """Require an active tenant-scoped human session for telemetry reads."""
-    tenant = _require_tenant(request)
-    auth_type = getattr(request.state, "auth_type", None)
-    user = getattr(request.state, "user", None)
-
-    if auth_type != "session" or user is None:
-        raise HTTPException(
-            status_code=403,
-            detail="human_session_required",
-        )
-
-    if user.status != "active" or tenant.status != "active":
-        raise HTTPException(
-            status_code=401,
-            detail="principal_inactive",
-        )
-
-    if user.tenant_id != tenant.tenant_id:
-        raise HTTPException(
-            status_code=403,
-            detail="tenant_mismatch",
-        )
-
-    require_permission(
-        user.role,
-        "tenant.telemetry.read",
-    )
-
-    return tenant
-
 def _serialize_event(event: SecurityEvent) -> dict:
     """Serialize a tenant event without exposing evaluator reasoning."""
     return {
@@ -100,7 +67,7 @@ def _serialize_event(event: SecurityEvent) -> dict:
 async def get_metrics(
     request: Request,
 ):
-    tenant = _require_human_telemetry_access(
+    tenant = _require_tenant(
         request
     )
 
