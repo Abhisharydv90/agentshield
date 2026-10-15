@@ -36,3 +36,20 @@ def test_approval_payload_redacts_common_pii_keys():
     assert redacted["profile"]["phone"] == "[REDACTED]"
     assert redacted["profile"]["date_of_birth"] == "[REDACTED]"
     assert redacted["profile"]["safe"] == "keep"
+
+
+def test_approval_payload_redacts_pii_in_free_text():
+    payload = {
+        "message": "Contact person@example.com; SSN 123-45-6789; card 4111 1111 1111 1111.",
+        "safe": "keep this",
+    }
+
+    redacted = _redact_approval_payload(payload)
+
+    assert "[REDACTED_EMAIL]" in redacted["message"]
+    assert "[REDACTED_SSN]" in redacted["message"]
+    assert "[REDACTED_CARD]" in redacted["message"]
+    assert "person@example.com" not in redacted["message"]
+    assert "123-45-6789" not in redacted["message"]
+    assert "4111 1111 1111 1111" not in redacted["message"]
+    assert redacted["safe"] == "keep this"
