@@ -49,6 +49,9 @@ class Capability(StrEnum):
 
     AGENT_DELEGATE = "agent:delegate"
 
+    ISOLATION_EXECUTE = "isolation:execute"
+    DEVICE_USE = "device:use"
+
 
 CAPABILITY_VALUES = frozenset(
     capability.value
