@@ -235,12 +235,26 @@ class SecurityDecisionEngine:
         if not self._agent_is_usable(agent):
             return build_result(SecurityDecision.DENY, "agent_unavailable")
 
+        effective_scopes = list(
+            action.effective_capabilities
+            if action.effective_capabilities is not None
+            else (agent.scopes or [])
+        )
+
+        if not set(effective_scopes).issubset(
+            set(agent.scopes or [])
+        ):
+            return build_result(
+                SecurityDecision.DENY,
+                "effective_capability_escalation",
+            )
+
         if action.capability_snapshot_hash != UNBOUND_HASH:
             expected_capability_hash = capability_snapshot_hash(
                 tenant_id=agent.tenant_id,
                 agent_id=agent.agent_id,
                 status=agent.status,
-                scopes=agent.scopes or [],
+                scopes=effective_scopes,
             )
             if action.capability_snapshot_hash != expected_capability_hash:
                 return build_result(
@@ -265,7 +279,7 @@ class SecurityDecisionEngine:
             return build_result(SecurityDecision.DENY, "unknown_operation")
 
         missing = missing_capabilities(
-            agent.scopes,
+            effective_scopes,
             required,
         )
 
