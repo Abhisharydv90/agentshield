@@ -101,8 +101,8 @@ async def test_non_streaming_tool_authorization_receives_authority_context(monke
             "action_fingerprint": "c" * 64,
         }
 
-    monkeypatch.setattr(
-        outbound,
+    monkeypatch.setitem(
+        outbound.authorize_non_streaming_response.__globals__,
         "execute_tool_with_judge",
         fake_execute_tool_with_judge,
     )
