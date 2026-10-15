@@ -135,6 +135,8 @@ def _build_security_action(
     trace_id: str | None,
     agent_scopes: Iterable[str],
     agent_status: str = "active",
+    effective_scopes: Iterable[str] | None = None,
+    authority_token_hash: str | None = None,
 ) -> SecurityAction:
     """
     Construct the canonical action presented to the Security Decision
@@ -171,7 +173,18 @@ def _build_security_action(
         provenance={
             "source": "judge_pipeline",
             "normalization": "deterministic",
+            **(
+                {"authority_token_hash": authority_token_hash}
+                if authority_token_hash
+                else {}
+            ),
         },
+        effective_capabilities=(
+            sorted(set(effective_scopes))
+            if effective_scopes is not None
+            else None
+        ),
+        authority_token_hash=authority_token_hash,
     )
 
 
@@ -443,6 +456,7 @@ async def execute_tool_with_judge(
     agent_scopes: Iterable[str] | None = None,
     agent_id: uuid.UUID | None = None,
     approval_id: str | uuid.UUID | None = None,
+    authority_context=None,
 ) -> dict:
     """
     Full runtime security pipeline.
@@ -558,6 +572,25 @@ async def execute_tool_with_judge(
             }
 
         authoritative_scopes, authoritative_status = agent_snapshot
+        effective_scopes = (
+            sorted(
+                set(authoritative_scopes)
+                & set(authority_context.capabilities)
+            )
+            if authority_context is not None
+            else authoritative_scopes
+        )
+        if authority_context is not None and (
+            authority_context.tenant_id != tenant_id
+            or authority_context.agent_id != agent_id
+        ):
+            return {
+                "decision": "deny",
+                "reason": "authority_context_identity_mismatch",
+                "category": "privilege_escalation",
+                "policy_version": policy_version,
+            }
+
         action = _build_security_action(
             normalized_call=normalized_call,
             policy=policy,
@@ -567,6 +600,12 @@ async def execute_tool_with_judge(
             trace_id=trace_id,
             agent_scopes=authoritative_scopes,
             agent_status=authoritative_status,
+            effective_scopes=effective_scopes,
+            authority_token_hash=(
+                authority_context.authority_token_hash
+                if authority_context is not None
+                else None
+            ),
         )
 
         decision_result = (
