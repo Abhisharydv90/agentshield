@@ -299,9 +299,7 @@ class IsolationRunner:
         context: SecurityContext,
         request: IsolationExecutionRequest,
     ) -> None:
-        required = {"execute"}
-        if request.policy.mode == IsolationMode.PROCESS:
-            required.add("process:execute")
+        required = {"isolation:execute"}
 
         mounts = request.policy.mounts
         if mounts:
