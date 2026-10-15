@@ -341,6 +341,8 @@ def _action_with_approval_trace(
         provenance=action.provenance,
         policy_hash=action.policy_hash,
         capability_snapshot_hash=action.capability_snapshot_hash,
+        effective_capabilities=action.effective_capabilities,
+        authority_token_hash=action.authority_token_hash,
     )
 
 
@@ -722,6 +724,15 @@ async def execute_tool_with_judge(
                 }
 
             authoritative_scopes, authoritative_status = agent_snapshot
+            effective_scopes = (
+                sorted(
+                    set(authoritative_scopes)
+                    & set(authority_context.capabilities)
+                )
+                if authority_context is not None
+                else authoritative_scopes
+            )
+
             action = _build_security_action(
                 normalized_call=normalized_call,
                 policy=policy,
@@ -731,6 +742,12 @@ async def execute_tool_with_judge(
                 trace_id=trace_id,
                 agent_scopes=authoritative_scopes,
                 agent_status=authoritative_status,
+                effective_scopes=effective_scopes,
+                authority_token_hash=(
+                    authority_context.authority_token_hash
+                    if authority_context is not None
+                    else None
+                ),
             )
 
             if approval_id is not None:
