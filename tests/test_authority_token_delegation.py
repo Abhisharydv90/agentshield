@@ -78,7 +78,9 @@ def test_valid_two_hop_chain_is_accepted():
     tenant = uuid.uuid4()
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()
+    grandchild_id = uuid.uuid4()
     parent_pair = IdentityKeyPair.generate()
+    child_pair = IdentityKeyPair.generate()
 
     parent_agent = _agent(
         tenant,
@@ -88,6 +90,11 @@ def test_valid_two_hop_chain_is_accepted():
     child_agent = _agent(
         tenant,
         child_id,
+        ["agent:delegate", "agent:invoke", "tool:read"],
+    )
+    grandchild_agent = _agent(
+        tenant,
+        grandchild_id,
         ["agent:invoke", "tool:read"],
     )
     policy_hash = _policy_hash()
@@ -99,9 +106,9 @@ def test_valid_two_hop_chain_is_accepted():
         risk_ceiling=80,
     )
     child_authority = AuthorityState.from_values(
-        capabilities={"agent:invoke", "tool:read"},
+        capabilities={"agent:delegate", "agent:invoke", "tool:read"},
         operations={"read"},
-        delegation_depth=2,
+        delegation_depth=1,
         risk_ceiling=70,
     )
 
@@ -124,22 +131,101 @@ def test_valid_two_hop_chain_is_accepted():
         ttl_seconds=240,
         parent_token_hash=root.token_hash,
     )
+    grandchild = AuthorityToken.issue(
+        signer=child_pair,
+        tenant_id=tenant,
+        issuer_agent_id=child_id,
+        subject_agent_id=grandchild_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:invoke", "tool:read"},
+            operations={"read"},
+            delegation_depth=0,
+            risk_ceiling=60,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=180,
+        parent_token_hash=child.token_hash,
+    )
 
     context = SecurityKernel().validate_authority_chain(
-        token_chain=(root, child),
-        target_agent=child_agent,
+        token_chain=(root, child, grandchild),
+        target_agent=grandchild_agent,
         issuer_identities={
             parent_id: _identity(tenant, parent_id, parent_pair),
+            child_id: _identity(tenant, child_id, child_pair),
         },
-        issuer_agents={parent_id: parent_agent},
+        issuer_agents={
+            parent_id: parent_agent,
+            child_id: child_agent,
+        },
         expected_policy_hash=policy_hash,
         trace_id="delegation-trace",
     )
 
-    assert context.agent_id == child_id
-    assert context.authority == child_authority
-    assert context.authority_token_hash == child.token_hash
+    assert context.agent_id == grandchild_id
+    assert context.authority_token_hash == grandchild.token_hash
+    assert context.authority.capabilities == frozenset({"agent:invoke", "tool:read"})
 
+
+
+def test_delegated_token_requires_remaining_parent_depth():
+    tenant = uuid.uuid4()
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    pair = IdentityKeyPair.generate()
+
+    parent_agent = _agent(
+        tenant,
+        parent_id,
+        ["agent:delegate", "agent:invoke", "tool:read"],
+    )
+    child_agent = _agent(
+        tenant,
+        child_id,
+        ["agent:invoke", "tool:read"],
+    )
+    policy_hash = _policy_hash()
+
+    root = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=parent_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:delegate", "agent:invoke", "tool:read"},
+            operations={"read"},
+            delegation_depth=0,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=300,
+    )
+    child = AuthorityToken.issue(
+        signer=pair,
+        tenant_id=tenant,
+        issuer_agent_id=parent_id,
+        subject_agent_id=child_id,
+        authority=AuthorityState.from_values(
+            capabilities={"agent:invoke", "tool:read"},
+            operations={"read"},
+            delegation_depth=0,
+        ),
+        policy_hash=policy_hash,
+        ttl_seconds=240,
+        parent_token_hash=root.token_hash,
+    )
+
+    with pytest.raises(
+        AuthorityDeniedError,
+        match="delegation_depth_exhausted",
+    ):
+        SecurityKernel().validate_authority_chain(
+            token_chain=(root, child),
+            target_agent=child_agent,
+            issuer_identities={parent_id: _identity(tenant, parent_id, pair)},
+            issuer_agents={parent_id: parent_agent},
+            expected_policy_hash=policy_hash,
+            trace_id="trace",
+        )
 
 
 def test_delegated_token_cannot_preserve_parent_delegation_depth():
