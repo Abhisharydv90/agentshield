@@ -22,6 +22,8 @@ from sqlalchemy import (
 
 from app.db.models import SecurityEvent
 from app.db.session import async_session
+from app.api.evidence import router as evidence_router
+from app.security.authorization import require_permission
 from app.telemetry.audit import verify_chain
 from app.api.evidence import router as evidence_router
 
@@ -32,22 +34,26 @@ router = APIRouter(
 )
 
 
-def _require_tenant(
+def _require_human_telemetry_access(
     request: Request,
 ):
-    tenant = getattr(
-        request.state,
-        "tenant",
-        None,
-    )
+    tenant = getattr(request.state, "tenant", None)
+    user = getattr(request.state, "user", None)
+    auth_type = getattr(request.state, "auth_type", None)
 
     if tenant is None:
-        raise HTTPException(
-            status_code=401,
-            detail="no_tenant",
-        )
+        raise HTTPException(status_code=401, detail="no_tenant")
+    if auth_type != "session" or user is None:
+        raise HTTPException(status_code=403, detail="human_session_required")
+    if user.status != "active" or tenant.status != "active":
+        raise HTTPException(status_code=401, detail="principal_inactive")
+    if user.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant_mismatch")
 
+    require_permission(user.role, "tenant.telemetry.read")
     return tenant
+
+
 
 def _serialize_event(event: SecurityEvent) -> dict:
     """Serialize a tenant event without exposing evaluator reasoning."""
@@ -65,7 +71,7 @@ def _serialize_event(event: SecurityEvent) -> dict:
 async def get_metrics(
     request: Request,
 ):
-    tenant = _require_tenant(
+    tenant = _require_human_telemetry_access(
         request
     )
 
