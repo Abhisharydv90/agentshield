@@ -568,7 +568,16 @@ async def chat_completions(
         tenant_id
     )
 
-        # ========================================================
+    authority_context = await _bind_presented_authority(
+        request=request,
+        tenant_id=tenant_id,
+        agent=agent,
+        policy=policy,
+        policy_version=policy_version,
+        trace_id=trace_id,
+    )
+
+    # ========================================================
     # Upstream model route
     # ========================================================
 
@@ -659,6 +668,8 @@ async def chat_completions(
                             agent_id,
                         approval_id=
                             approval_id,
+                        authority_context=
+                            authority_context,
                     )
                 ):
 
