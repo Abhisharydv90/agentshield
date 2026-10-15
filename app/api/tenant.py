@@ -28,7 +28,8 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import IntegrityError, select, update
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings as _settings
 from app.db.models import (
