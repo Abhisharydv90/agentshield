@@ -78,6 +78,12 @@ class Settings(BaseSettings):
         le=16,
     )
 
+    AUTHORITY_MAX_TOKEN_CHAIN_LENGTH: int = Field(
+        default=16,
+        ge=1,
+        le=32,
+    )
+
     # ---------------------------------------------------------
     # Injection detection
     # ---------------------------------------------------------
