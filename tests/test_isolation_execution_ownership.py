@@ -21,7 +21,7 @@ def _context(
 ) -> SecurityContext:
     tenant_id = tenant_id or uuid.uuid4()
     agent_id = agent_id or uuid.uuid4()
-    capabilities = frozenset({"execute"})
+    capabilities = frozenset({"execute", "isolation:execute"})
     return SecurityContext(
         tenant_id=tenant_id,
         agent_id=agent_id,
