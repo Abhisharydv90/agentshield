@@ -268,62 +268,102 @@ async def _bind_presented_authority(
     policy_version: str,
     trace_id: str,
 ) -> SecurityContext | None:
-    """Validate an optional signed authority token against the authenticated Agent.
+    """Validate a self-issued or delegated signed authority-token chain."""
 
-    The token is deliberately optional during the migration from AgentShield's
-    legacy scope path. When present, it is strict: identity, tenant, subject,
-    signature, policy content and authority conservation all have to pass.
-    """
+    raw_chain = request.headers.get(
+        "X-AURAGENT-Authority-Chain"
+    )
+    raw_token = request.headers.get(
+        "X-AURAGENT-Authority-Token"
+    )
 
-    raw = request.headers.get("X-AURAGENT-Authority-Token")
-    if not raw:
+    if not raw_chain and not raw_token:
         return None
 
+    import json
+
     try:
-        token = AuthorityToken.from_dict(__import__("json").loads(raw))
+        if raw_chain:
+            payload = json.loads(raw_chain)
+            if not isinstance(payload, list) or not payload:
+                raise ValueError("authority chain must be a non-empty list")
+            token_chain = [
+                AuthorityToken.from_dict(item)
+                for item in payload
+                if isinstance(item, dict)
+            ]
+            if len(token_chain) != len(payload):
+                raise ValueError("authority chain item must be an object")
+
+            if raw_token:
+                leaf = AuthorityToken.from_dict(json.loads(raw_token))
+                if leaf.token_hash != token_chain[-1].token_hash:
+                    raise ValueError("authority chain leaf mismatch")
+        else:
+            token_chain = [
+                AuthorityToken.from_dict(
+                    json.loads(raw_token)
+                )
+            ]
     except Exception as exc:
-        raise HTTPException(status_code=401, detail="invalid_authority_token") from exc
+        raise HTTPException(
+            status_code=401,
+            detail="invalid_authority_token",
+        ) from exc
+
+    issuer_ids = {
+        token.issuer_agent_id
+        for token in token_chain
+    }
 
     async with async_session() as session:
-        identity = (
+        identities_rows = (
             await session.execute(
                 select(AgentIdentity)
                 .where(AgentIdentity.tenant_id == tenant_id)
-                .where(AgentIdentity.agent_id == agent.agent_id)
+                .where(AgentIdentity.agent_id.in_(issuer_ids))
                 .where(AgentIdentity.status == "active")
-                .limit(1)
             )
-        ).scalar_one_or_none()
+        ).scalars().all()
 
-    if identity is None:
-        raise HTTPException(status_code=401, detail="agent_cryptographic_identity_not_registered")
+        agents_rows = (
+            await session.execute(
+                select(Agent)
+                .where(Agent.tenant_id == tenant_id)
+                .where(Agent.agent_id.in_(issuer_ids))
+                .where(Agent.status == "active")
+            )
+        ).scalars().all()
 
-    commitment = PolicyCommitment.from_policy(
-        policy,
-        name=getattr(policy, "name", None),
-        version=policy_version,
-    )
+    identities = {
+        row.agent_id: row
+        for row in identities_rows
+    }
+    issuers = {
+        row.agent_id: row
+        for row in agents_rows
+    }
 
     try:
-        context = SecurityKernel().validate_token_against_agent(
-            token=token,
-            identity=identity,
-            agent=agent,
-            expected_policy_hash=commitment.content_hash,
+        context = SecurityKernel().validate_authority_chain(
+            token_chain=token_chain,
+            target_agent=agent,
+            issuer_identities=identities,
+            issuer_agents=issuers,
+            expected_policy_hash=PolicyCommitment.from_policy(
+                policy,
+                name=getattr(policy, "name", None),
+                version=policy_version,
+            ).content_hash,
+            trace_id=trace_id,
         )
     except AuthorityDeniedError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
 
-    return SecurityContext(
-        tenant_id=context.tenant_id,
-        agent_id=context.agent_id,
-        trace_id=trace_id,
-        capabilities=context.capabilities,
-        authority=context.authority,
-        policy_hash=context.policy_hash,
-        authority_token_hash=context.authority_token_hash,
-        provenance={"source": "x-auragent-authority-token"},
-    )
+    return context
 
 # ============================================================
 # Runtime endpoint
@@ -528,7 +568,16 @@ async def chat_completions(
         tenant_id
     )
 
-        # ========================================================
+    authority_context = await _bind_presented_authority(
+        request=request,
+        tenant_id=tenant_id,
+        agent=agent,
+        policy=policy,
+        policy_version=policy_version,
+        trace_id=trace_id,
+    )
+
+    # ========================================================
     # Upstream model route
     # ========================================================
 
@@ -619,6 +668,8 @@ async def chat_completions(
                             agent_id,
                         approval_id=
                             approval_id,
+                        authority_context=
+                            authority_context,
                     )
                 ):
 
