@@ -44,9 +44,9 @@ from app.security.evidence.binding import (
 )
 
 
-_EMAIL_PATTERN = re.compile(r"(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
-_SSN_PATTERN = re.compile(r"\\b\\d{3}-\\d{2}-\\d{4}\\b")
-_CARD_PATTERN = re.compile(r"(?<!\\d)(?:\\d[ -]?){13,19}(?!\\d)")
+_EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+_CARD_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
 
 
 _SENSITIVE_KEY_MARKERS = (
