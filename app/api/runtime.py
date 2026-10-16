@@ -9,6 +9,7 @@ Actual execution still flows through the runtime execution boundary.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -17,7 +18,7 @@ from fastapi import (
     HTTPException,
     Request,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.runtime.bootstrap import (
     get_runtime_engine,
@@ -35,6 +36,22 @@ router = APIRouter(
     prefix="/api/runtime",
     tags=["runtime"],
 )
+
+
+_MAX_RUNTIME_JSON_BYTES = 512 * 1024
+
+
+def _json_size(value: Any) -> int:
+    try:
+        return len(
+            json.dumps(
+                value,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return _MAX_RUNTIME_JSON_BYTES + 1
 
 
 class TaskSubmitRequest(BaseModel):
@@ -68,6 +85,18 @@ class TaskSubmitRequest(BaseModel):
         default=None,
         max_length=200,
     )
+
+    @model_validator(mode="after")
+    def validate_json_budget(self):
+        if (
+            _json_size(self.payload)
+            + _json_size(self.metadata)
+            > _MAX_RUNTIME_JSON_BYTES
+        ):
+            raise ValueError(
+                "runtime_payload_too_large"
+            )
+        return self
 
 
 class TaskResponse(BaseModel):
