@@ -42,9 +42,10 @@ Signed authority context is propagated into both streaming and non-streaming out
 - Runtime task reads require exact tenant + agent ownership; same-tenant agents cannot inspect each other's task records.
 - Runtime task cancellation verifies ownership before invoking the scheduler, preventing cross-agent cancellation.
 - Runtime session closure verifies exact agent ownership before mutating session state.
+- Runtime task/session/workflow creation and control require the canonical `agent:invoke` capability.
 - Missing or malformed runtime ownership metadata fails closed with non-enumerating 404 responses.
 - Unexpected runtime/workflow submission exceptions return stable generic error codes instead of leaking backend/database exception details.
-- Regression tests cover cross-agent task/session control and unexpected error isolation.
+- Regression tests cover cross-agent task/session control, invocation capability enforcement, and unexpected error isolation.
 
 ## Non-goals
 
