@@ -393,3 +393,36 @@ def test_workflow_input_budget_rejects_oversized_json():
             ],
             input_payload={"data": "x" * (1024 * 1024)},
         )
+
+
+
+def test_memory_content_budget_rejects_oversized_content():
+    from app.api import memory
+
+    with pytest.raises(ValidationError):
+        memory.MemoryCreateRequest(
+            namespace="agent",
+            key="large",
+            content="x" * (256 * 1024 + 1),
+        )
+
+
+def test_memory_metadata_budget_rejects_oversized_metadata():
+    from app.api import memory
+
+    with pytest.raises(ValidationError):
+        memory.MemoryCreateRequest(
+            namespace="agent",
+            key="large",
+            content="ok",
+            metadata={"data": "x" * (512 * 1024)},
+        )
+
+
+def test_memory_search_query_has_bounded_length():
+    from app.api import memory
+
+    with pytest.raises(ValidationError):
+        memory.MemorySearchRequest(
+            query="x" * 4097,
+        )
