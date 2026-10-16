@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.development.manifests.manifest import AgentManifest
 from app.development.templates import normalize_manifest
 
 
@@ -15,18 +16,11 @@ def build_manifest(
     tools: list[str] | None = None,
     environment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    runtime = runtime.strip()
-    entrypoint = entrypoint.strip()
-    if not runtime:
-        raise ValueError("agent_runtime_required")
-    if not entrypoint:
-        raise ValueError("agent_entrypoint_required")
-    manifest: dict[str, Any] = {
-        "runtime": runtime,
-        "entrypoint": entrypoint,
-        "tools": list(tools or []),
-        "environment": dict(environment or {}),
-    }
-    if model:
-        manifest["model"] = model.strip()
+    manifest = AgentManifest(
+        runtime=runtime,
+        entrypoint=entrypoint,
+        model=model,
+        tools=list(tools or []),
+        environment=dict(environment or {}),
+    ).bounded_dict()
     return normalize_manifest(manifest)
