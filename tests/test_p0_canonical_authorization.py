@@ -106,8 +106,17 @@ async def test_non_streaming_tool_authorization_receives_authority_context(monke
         "execute_tool_with_judge",
         fake_execute_tool_with_judge,
     )
+    monkeypatch.setattr(
+        outbound,
+        "_safe_tool_call_from_openai",
+        lambda _tool_call: {
+            "id": "call-1",
+            "name": "db.query",
+            "arguments": {"table": "billing_invoices"},
+        },
+    )
 
-    body = b'{"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{"name":"db.query","arguments":"{\"table\":\"billing_invoices\"}"}}]}}]}'
+    body = b'{"choices":[{"message":{"tool_calls":[{"id":"call-1","function":{}}]}}]}'
 
     result = await outbound.authorize_non_streaming_response(
         body=body,
