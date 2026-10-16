@@ -1,7 +1,7 @@
 """add phase 1 agent development tables
 
 Revision ID: p1a2b3c4d5e6
-Revises: 6d0c4e7a91b2
+Revises: 70c087e570a7
 """
 
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "p1a2b3c4d5e6"
-down_revision: Union[str, None] = "6d0c4e7a91b2"
+down_revision: Union[str, None] = "70c087e570a7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
