@@ -47,11 +47,13 @@ class WorkflowStepRequest(BaseModel):
     agent_id: uuid.UUID
 
     config: dict = Field(
-        default_factory=dict
+        default_factory=dict,
+        max_length=100,
     )
 
     depends_on: list[str] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=100,
     )
 
 
@@ -68,7 +70,10 @@ class WorkflowSubmitRequest(BaseModel):
 
     steps: list[
         WorkflowStepRequest
-    ]
+    ] = Field(
+        min_length=1,
+        max_length=200,
+    )
 
     input_payload: object | None = None
 
