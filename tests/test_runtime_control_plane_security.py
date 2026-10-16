@@ -12,7 +12,11 @@ from app.api import runtime
 from app.api import workflows
 
 
-def _request(tenant_id: uuid.UUID, agent_id: uuid.UUID) -> Request:
+def _request(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    scopes: list[str] | None = None,
+) -> Request:
     scope = {
         "type": "http",
         "method": "GET",
@@ -28,6 +32,7 @@ def _request(tenant_id: uuid.UUID, agent_id: uuid.UUID) -> Request:
     request.state.agent = SimpleNamespace(
         agent_id=agent_id,
         status="active",
+        scopes=scopes if scopes is not None else ["agent:invoke"],
     )
     return request
 
@@ -209,6 +214,53 @@ async def test_close_session_allows_exact_agent_owner(monkeypatch):
         "session_id": str(session_id),
     }
     assert sessions.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_and_workflow_require_invoke_capability(monkeypatch):
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+
+    class Engine:
+        pass
+
+    async def fake_engine():
+        raise AssertionError("runtime engine must not be reached")
+
+    monkeypatch.setattr(runtime, "get_runtime_engine", fake_engine)
+    monkeypatch.setattr(workflows, "get_runtime_engine", fake_engine)
+
+    request = _request(tenant_id, agent_id, scopes=["tool:read"])
+
+    with pytest.raises(runtime.HTTPException) as runtime_exc:
+        await runtime.create_session(request)
+
+    assert runtime_exc.value.status_code == 403
+    assert runtime_exc.value.detail == {
+        "error": "capability_required",
+        "capability": "agent:invoke",
+    }
+
+    body = workflows.WorkflowSubmitRequest(
+        name="test-workflow",
+        version="1",
+        steps=[
+            workflows.WorkflowStepRequest(
+                key="step-1",
+                task_kind="test",
+                agent_id=agent_id,
+            )
+        ],
+    )
+
+    with pytest.raises(workflows.HTTPException) as workflow_exc:
+        await workflows.submit_workflow(request, body)
+
+    assert workflow_exc.value.status_code == 403
+    assert workflow_exc.value.detail == {
+        "error": "capability_required",
+        "capability": "agent:invoke",
+    }
 
 
 @pytest.mark.asyncio
