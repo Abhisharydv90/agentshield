@@ -25,6 +25,10 @@ from app.runtime.bootstrap import (
 from app.runtime.tasks import (
     TaskSpec,
 )
+from app.security.capabilities import (
+    Capability,
+    require_capability,
+)
 
 
 router = APIRouter(
@@ -114,6 +118,11 @@ def _require_agent(
             detail="agent_inactive",
         )
 
+    require_capability(
+        agent.scopes or [],
+        Capability.AGENT_INVOKE,
+    )
+
     return tenant, agent
 
 
@@ -129,8 +138,6 @@ def _require_owned_task(
     """
 
     if record is None or record.agent_id != agent_id:
-        # Use the same 404 shape for missing and non-owned tasks so callers
-        # cannot enumerate task ownership across agents in the same tenant.
         raise HTTPException(
             status_code=404,
             detail="runtime_task_not_found",
@@ -305,9 +312,6 @@ async def cancel_task(
 
     engine = await get_runtime_engine()
 
-    # Verify ownership from the durable record before invoking cancellation.
-    # This keeps the control operation scoped to the authenticated agent even
-    # though the underlying scheduler cancellation is tenant-keyed.
     record = await engine.store.get_task(
         tenant.tenant_id,
         task_id,
