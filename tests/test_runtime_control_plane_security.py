@@ -6,6 +6,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from starlette.requests import Request
 
 from app.api import runtime
@@ -221,9 +222,6 @@ async def test_runtime_and_workflow_require_invoke_capability(monkeypatch):
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
 
-    class Engine:
-        pass
-
     async def fake_engine():
         raise AssertionError("runtime engine must not be reached")
 
@@ -324,3 +322,41 @@ async def test_workflow_submission_hides_unexpected_exception(monkeypatch):
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "workflow_submission_failed"
+
+
+def test_runtime_metadata_and_workflow_graph_have_cardinality_bounds():
+    with pytest.raises(ValidationError):
+        runtime.TaskSubmitRequest(
+            kind="test",
+            metadata={str(i): i for i in range(101)},
+        )
+
+    with pytest.raises(ValidationError):
+        workflows.WorkflowStepRequest(
+            key="step",
+            task_kind="test",
+            agent_id=uuid.uuid4(),
+            config={str(i): i for i in range(101)},
+        )
+
+    with pytest.raises(ValidationError):
+        workflows.WorkflowStepRequest(
+            key="step",
+            task_kind="test",
+            agent_id=uuid.uuid4(),
+            depends_on=[str(i) for i in range(101)],
+        )
+
+    with pytest.raises(ValidationError):
+        workflows.WorkflowSubmitRequest(
+            name="workflow",
+            version="1",
+            steps=[
+                workflows.WorkflowStepRequest(
+                    key=str(i),
+                    task_kind="test",
+                    agent_id=uuid.uuid4(),
+                )
+                for i in range(201)
+            ],
+        )
