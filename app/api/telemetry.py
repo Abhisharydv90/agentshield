@@ -203,7 +203,7 @@ async def verify_audit_chain(
     request: Request,
 ):
 
-    tenant = _require_human_telemetry_access(
+    tenant = _require_tenant(
         request
     )
 
