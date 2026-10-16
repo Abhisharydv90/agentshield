@@ -280,6 +280,21 @@ async def update_agent(
     return agent_view(agent)
 
 
+async def delete_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> None:
+    agent = await get_agent(session, tenant_id, agent_id)
+    if agent is None:
+        raise LookupError("agent_not_found")
+    if agent.status != "revoked":
+        raise ValueError("agent_must_be_revoked_before_delete")
+    await session.delete(agent)
+    await session.commit()
+
+
 async def transition_agent(
     session: AsyncSession,
     *,
