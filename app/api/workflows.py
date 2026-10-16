@@ -21,6 +21,10 @@ from app.runtime.workflows.engine import (
     WorkflowStepSpec,
     WorkflowValidationError,
 )
+from app.security.capabilities import (
+    Capability,
+    require_capability,
+)
 
 
 router = APIRouter(
@@ -102,6 +106,11 @@ def _require_agent(
             detail="agent_inactive",
         )
 
+    require_capability(
+        agent.scopes or [],
+        Capability.AGENT_INVOKE,
+    )
+
     return tenant, agent
 
 
@@ -122,9 +131,6 @@ async def submit_workflow(
             detail="workflow_steps_required",
         )
 
-    # Only allow the submitting agent to create work for itself until
-    # the Trust/Delegation phase introduces explicit cross-agent
-    # delegation semantics.
     for step in body.steps:
         if (
             step.agent_id
