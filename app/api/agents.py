@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db
 from app.development import service
 from app.security.authorization import require_permission
 from app.security.capabilities import Capability, normalize_capabilities
@@ -124,11 +123,9 @@ class TemplateAgentRequest(BaseModel):
 @router.get("")
 async def list_agents(request: Request):
     tenant_id, _ = _context(request, "tenant.agents.read")
-    session: AsyncSession = await get_db().__anext__()  # type: ignore
-    try:
+    from app.db.session import async_session
+    async with async_session() as session:
         return await service.list_agents(session, tenant_id)
-    finally:
-        await session.close()
 
 
 @router.post("", status_code=201)
@@ -150,6 +147,7 @@ async def create_agent(body: AgentCreateRequest, request: Request):
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.get("/{agent_id}")
@@ -181,6 +179,23 @@ async def patch_agent(agent_id: str, body: AgentPatchRequest, request: Request):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/{agent_id}", status_code=204)
+async def delete_agent(agent_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.delete")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            await service.delete_agent(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{agent_id}/lifecycle")
@@ -328,7 +343,202 @@ async def remove_member(agent_id: str, user_id: str, request: Request):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/templates/list")
+
+
+@router.get("/{agent_id}")
+async def get_agent(agent_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.read")
+    from app.db.session import async_session
+    async with async_session() as session:
+        row = await service.get_agent(session, tenant_id, _uuid(agent_id, "invalid_agent_id"))
+        if row is None:
+            raise HTTPException(status_code=404, detail="agent_not_found")
+        return service.agent_view(row)
+
+
+@router.patch("/{agent_id}")
+async def patch_agent(agent_id: str, body: AgentPatchRequest, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.update_agent(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                name=body.name,
+                description=body.description,
+                api_key_id=body.api_key_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/{agent_id}", status_code=204)
+async def delete_agent(agent_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.delete")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            await service.delete_agent(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{agent_id}/lifecycle")
+async def lifecycle(agent_id: str, body: LifecycleRequest, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.transition_agent(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                status=body.status,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{agent_id}/versions")
+async def versions(agent_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.read")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.list_versions(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{agent_id}/versions", status_code=201)
+async def create_version(agent_id: str, body: VersionCreateRequest, request: Request):
+    tenant_id, user_id = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.create_version(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                user_id=user_id,
+                version=body.version,
+                description=body.description,
+                capabilities=body.capabilities,
+                manifest=body.manifest,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{agent_id}/versions/{version_id}/publish")
+async def publish_version(agent_id: str, version_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.publish_version(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                version_id=_uuid(version_id, "invalid_version_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{agent_id}/versions/{version_id}/revoke")
+async def revoke_version(agent_id: str, version_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.revoke_version(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                version_id=_uuid(version_id, "invalid_version_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/{agent_id}/members")
+async def members(agent_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.read")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.list_members(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{agent_id}/members", status_code=201)
+async def add_member(agent_id: str, body: MemberRequest, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            return await service.add_member(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                user_id=_uuid(body.user_id, "invalid_user_id"),
+                role=body.role,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/{agent_id}/members/{user_id}", status_code=204)
+async def remove_member(agent_id: str, user_id: str, request: Request):
+    tenant_id, _ = _context(request, "tenant.agents.write")
+    from app.db.session import async_session
+    async with async_session() as session:
+        try:
+            await service.remove_member(
+                session,
+                tenant_id=tenant_id,
+                agent_id=_uuid(agent_id, "invalid_agent_id"),
+                user_id=_uuid(user_id, "invalid_user_id"),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/templates")
 async def templates(request: Request):
     tenant_id, _ = _context(request, "tenant.agents.read")
     from app.db.session import async_session
