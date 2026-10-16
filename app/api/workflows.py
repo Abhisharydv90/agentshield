@@ -19,6 +19,7 @@ from app.runtime.bootstrap import (
 from app.runtime.workflows.engine import (
     WorkflowSpec,
     WorkflowStepSpec,
+    WorkflowValidationError,
 )
 
 
@@ -168,10 +169,15 @@ async def submit_workflow(
             trace_id=trace_id,
             input_payload=body.input_payload,
         )
-    except Exception as exc:
+    except WorkflowValidationError as exc:
         raise HTTPException(
             status_code=400,
             detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="workflow_submission_failed",
         ) from exc
 
     return {
