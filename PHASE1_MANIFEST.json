@@ -31,7 +31,7 @@
   "database": {
     "migration": "app/db/migrations/versions/p1a2b3c4d5e6_add_agent_development.py",
     "revision": "p1a2b3c4d5e6",
-    "down_revision": "70c087e570a7"
+    "down_revision": "e1b7c8d9e0f1"
   },
   "api": [
     "/v1/agents",
