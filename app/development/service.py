@@ -67,6 +67,8 @@ async def _validate_api_key(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     api_key_id: str | None,
+    *,
+    exclude_agent_id: uuid.UUID | None = None,
 ) -> uuid.UUID | None:
     if api_key_id is None:
         return None
@@ -79,6 +81,15 @@ async def _validate_api_key(
         raise ValueError("api_key_not_found")
     if key.revoked:
         raise ValueError("api_key_revoked")
+
+    binding = (
+        await session.execute(
+            select(Agent).where(Agent.api_key_id == kid)
+        )
+    ).scalar_one_or_none()
+    if binding is not None and binding.agent_id != exclude_agent_id:
+        raise ValueError("api_key_already_bound")
+
     return kid
 
 
@@ -273,7 +284,12 @@ async def update_agent(
     if description is not None:
         agent.description = description.strip()
     if api_key_id is not None:
-        agent.api_key_id = await _validate_api_key(session, tenant_id, api_key_id)
+        agent.api_key_id = await _validate_api_key(
+            session,
+            tenant_id,
+            api_key_id,
+            exclude_agent_id=agent.agent_id,
+        )
 
     await session.commit()
     await session.refresh(agent)
@@ -450,13 +466,27 @@ async def revoke_version(
                 AgentVersion.tenant_id == tenant_id,
                 AgentVersion.agent_id == agent_id,
                 AgentVersion.status == "published",
+                AgentVersion.version_id != version_id,
             )
+            .order_by(AgentVersion.published_at.desc(), AgentVersion.created_at.desc())
         )
     ).scalars().all()
-    if len(published) <= 1 and row.status == "published":
+
+    if row.status == "published" and not published:
         raise ValueError("cannot_revoke_only_published_version")
 
     row.status = "revoked"
+
+    # If the revoked version is currently represented by the Agent capability
+    # set, switch to the newest remaining published version so runtime does
+    # not retain capabilities from a revoked definition.
+    if (
+        row.status == "revoked"
+        and set(agent.scopes or []) == set(row.capabilities or [])
+        and published
+    ):
+        agent.scopes = sorted(set(published[0].capabilities or []))
+
     await session.commit()
     await session.refresh(row)
     return version_view(row)
@@ -702,6 +732,18 @@ async def add_member(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        if existing.role == "manager" and role != "manager":
+            manager_count = (
+                await session.execute(
+                    select(AgentMember).where(
+                        AgentMember.tenant_id == tenant_id,
+                        AgentMember.agent_id == agent_id,
+                        AgentMember.role == "manager",
+                    )
+                )
+            ).scalars().all()
+            if len(manager_count) <= 1:
+                raise ValueError("cannot_remove_last_agent_manager")
         existing.role = role
         await session.commit()
         return member_view(existing, user)
