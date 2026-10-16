@@ -117,6 +117,56 @@ def _require_agent(
     return tenant, agent
 
 
+def _require_owned_task(
+    record,
+    agent_id: uuid.UUID,
+) -> None:
+    """
+    Require exact agent ownership for runtime task control.
+
+    Tenant scoping alone is insufficient because one tenant can contain
+    multiple autonomous agents with distinct authority boundaries.
+    """
+
+    if record is None or record.agent_id != agent_id:
+        # Use the same 404 shape for missing and non-owned tasks so callers
+        # cannot enumerate task ownership across agents in the same tenant.
+        raise HTTPException(
+            status_code=404,
+            detail="runtime_task_not_found",
+        )
+
+
+def _session_agent_id(session: Any) -> uuid.UUID | None:
+    value = (
+        session.get("agent_id")
+        if isinstance(session, dict)
+        else getattr(session, "agent_id", None)
+    )
+
+    try:
+        return uuid.UUID(str(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _require_owned_session(
+    session: Any,
+    agent_id: uuid.UUID,
+) -> None:
+    """
+    Require exact agent ownership for runtime session control.
+
+    Missing or malformed ownership metadata fails closed.
+    """
+
+    if session is None or _session_agent_id(session) != agent_id:
+        raise HTTPException(
+            status_code=404,
+            detail="runtime_session_not_found",
+        )
+
+
 def _task_response(
     record,
 ) -> TaskResponse:
@@ -197,10 +247,15 @@ async def submit_task(
         record = await engine.submit_task(
             spec
         )
-    except Exception as exc:
+    except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="runtime_task_submission_failed",
         ) from exc
 
     return _task_response(
@@ -216,7 +271,7 @@ async def get_task(
     request: Request,
     task_id: uuid.UUID,
 ):
-    tenant, _agent = _require_agent(
+    tenant, agent = _require_agent(
         request
     )
 
@@ -227,11 +282,10 @@ async def get_task(
         task_id,
     )
 
-    if record is None:
-        raise HTTPException(
-            status_code=404,
-            detail="runtime_task_not_found",
-        )
+    _require_owned_task(
+        record,
+        agent.agent_id,
+    )
 
     return _task_response(
         record
@@ -245,11 +299,24 @@ async def cancel_task(
     request: Request,
     task_id: uuid.UUID,
 ):
-    tenant, _agent = _require_agent(
+    tenant, agent = _require_agent(
         request
     )
 
     engine = await get_runtime_engine()
+
+    # Verify ownership from the durable record before invoking cancellation.
+    # This keeps the control operation scoped to the authenticated agent even
+    # though the underlying scheduler cancellation is tenant-keyed.
+    record = await engine.store.get_task(
+        tenant.tenant_id,
+        task_id,
+    )
+
+    _require_owned_task(
+        record,
+        agent.agent_id,
+    )
 
     cancelled = (
         await engine.cancel_task(
@@ -317,11 +384,21 @@ async def close_session(
     request: Request,
     session_id: uuid.UUID,
 ):
-    tenant, _agent = _require_agent(
+    tenant, agent = _require_agent(
         request
     )
 
     engine = await get_runtime_engine()
+
+    session = await engine.sessions.get(
+        tenant_id=tenant.tenant_id,
+        session_id=session_id,
+    )
+
+    _require_owned_session(
+        session,
+        agent.agent_id,
+    )
 
     await engine.sessions.close(
         tenant_id=tenant.tenant_id,
