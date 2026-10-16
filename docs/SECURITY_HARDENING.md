@@ -1,6 +1,6 @@
 # Security Hardening Status
 
-This branch contains the completed P0-P2 security hardening pass for AgentShield.
+This branch carries the completed P0-P2 security hardening pass plus the P3 runtime control-plane hardening changes.
 
 ## P0 — critical enforcement
 
@@ -36,6 +36,16 @@ Signed authority context is propagated into both streaming and non-streaming out
 - CI compiles application/test code before the test phase.
 - CI requires exactly one Alembic migration head.
 - Security regression tests are maintained alongside the affected control boundaries.
+
+## P3 — runtime control-plane hardening
+
+- Runtime task reads require exact tenant + agent ownership; same-tenant agents cannot inspect each other's task records.
+- Runtime task cancellation verifies ownership before invoking the scheduler, preventing cross-agent cancellation.
+- Runtime session closure verifies exact agent ownership before mutating session state.
+- Runtime task/session/workflow creation and control require the canonical `agent:invoke` capability.
+- Missing or malformed runtime ownership metadata fails closed with non-enumerating 404 responses.
+- Unexpected runtime/workflow submission exceptions return stable generic error codes instead of leaking backend/database exception details.
+- Regression tests cover cross-agent task/session control, invocation capability enforcement, and unexpected error isolation.
 
 ## Non-goals
 
