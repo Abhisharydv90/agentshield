@@ -426,3 +426,35 @@ def test_memory_search_query_has_bounded_length():
         memory.MemorySearchRequest(
             query="x" * 4097,
         )
+
+
+
+@pytest.mark.asyncio
+async def test_memory_security_context_must_match_authenticated_principal():
+    from app.api import memory
+    from app.security.context import SecurityContext
+    from app.security.delegation.model import AuthorityState
+
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    other_agent_id = uuid.uuid4()
+
+    request = _request(
+        tenant_id,
+        agent_id,
+        scopes=["agent:invoke", "memory:read", "memory:write"],
+    )
+    request.state.security_context = SecurityContext(
+        tenant_id=tenant_id,
+        agent_id=other_agent_id,
+        trace_id="trace-test",
+        capabilities=frozenset({"memory:read"}),
+        authority=AuthorityState(),
+        policy_hash="test",
+    )
+
+    with pytest.raises(memory.HTTPException) as exc_info:
+        await memory._security_context(request)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "security_context_principal_mismatch"
