@@ -16,6 +16,12 @@ def build_manifest(
     tools: list[str] | None = None,
     environment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    runtime = runtime.strip()
+    entrypoint = entrypoint.strip()
+    if not runtime:
+        raise ValueError("agent_runtime_required")
+    if not entrypoint:
+        raise ValueError("agent_entrypoint_required")
     manifest = AgentManifest(
         runtime=runtime,
         entrypoint=entrypoint,
