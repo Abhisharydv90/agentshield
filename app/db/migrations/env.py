@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.config import settings
 from app.db.models import Base
 from app.db import runtime_models  # noqa: F401
-from app.db import memory_models  # noqa: F401
+from app.db import memory_models  # noqa: F401\nfrom app.development import models as development_models  # noqa: F401
 
 config = context.config
 
