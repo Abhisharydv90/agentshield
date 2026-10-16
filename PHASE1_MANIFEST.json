@@ -1,0 +1,50 @@
+{
+  "phase": 1,
+  "name": "Agent Development & Management",
+  "status": "implementation-complete",
+  "scope": [
+    "agent builder and validated manifests",
+    "tenant-scoped agent CRUD",
+    "immutable agent versions",
+    "capability configuration through versions",
+    "agent lifecycle transitions",
+    "reusable tenant-scoped templates",
+    "template-based agent creation",
+    "deployment declarations",
+    "agent team memberships",
+    "agent and deployment dashboard surfaces"
+  ],
+  "security_invariants": [
+    "all management operations require a human session",
+    "tenant scope is resolved server-side",
+    "agent capabilities use the existing controlled vocabulary",
+    "agent:invoke is required for runnable agent definitions",
+    "capability changes are captured in immutable versions",
+    "published version capability state is the runtime capability set",
+    "deployment versions must belong to the same tenant and agent",
+    "deployments require a published version",
+    "revoked agents cannot be redeployed",
+    "last agent manager cannot be removed",
+    "phase 1 never mints delegated authority",
+    "phase 1 never directly executes workloads"
+  ],
+  "database": {
+    "migration": "app/db/migrations/versions/p1a2b3c4d5e6_add_agent_development.py",
+    "revision": "p1a2b3c4d5e6",
+    "down_revision": "e1b7c8d9e0f1"
+  },
+  "api": [
+    "/v1/agents",
+    "/v1/agents/{agent_id}/versions",
+    "/v1/agents/{agent_id}/lifecycle",
+    "/v1/agents/{agent_id}/members",
+    "/v1/agents/templates",
+    "/v1/agents/from-template/{template_id}",
+    "/v1/deployments"
+  ],
+  "verification": {
+    "phase1_tests": "tests/test_phase1_agent_development.py",
+    "full_suite": "run after phase implementation",
+    "frontend": "dashboard agent/deployment pages added"
+  }
+}
