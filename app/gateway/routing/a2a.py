@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 import httpx
 
 from app.config import settings
+from app.gateway.routing.transport_security import authorize_external_transport
+from app.tools.contracts import ToolKind
 
 
 class A2ARouteError(RuntimeError):
@@ -132,6 +135,7 @@ class A2ARouter:
         tenant_id: str,
         agent_id: str,
         trace_id: str,
+        agent_scopes,
         payload,
     ) -> dict:
         route = self.resolve(
@@ -154,53 +158,68 @@ class A2ARouter:
             **route.headers,
         }
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                route.timeout_seconds
-            ),
-            follow_redirects=False,
-        ) as client:
-            try:
-                response = await client.post(
-                    route.url,
-                    json=envelope,
-                    headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                raise A2ARouteError(
-                    "a2a_upstream_unavailable"
-                ) from exc
+        async def send():
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(route.timeout_seconds),
+                follow_redirects=False,
+            ) as client:
+                try:
+                    response = await client.post(
+                        route.url,
+                        json=envelope,
+                        headers=headers,
+                    )
+                except httpx.HTTPError:
+                    return {
+                        "status_code": 502,
+                        "route": route.name,
+                        "result": {"error": "a2a_upstream_unavailable"},
+                    }
 
-        if len(
-            response.content
-        ) > 4 * 1024 * 1024:
-            raise A2ARouteError(
-                "a2a_response_too_large"
-            )
+            if len(response.content) > 4 * 1024 * 1024:
+                raise A2ARouteError("a2a_response_too_large")
 
-        content_type = response.headers.get(
-            "content-type",
-            "application/json",
-        )
+            content_type = response.headers.get("content-type", "application/json")
+            if content_type.startswith("application/json"):
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text[:8192]}
+            else:
+                result = {"raw": response.text[:8192]}
 
-        if content_type.startswith(
-            "application/json"
-        ):
-            try:
-                result = response.json()
-            except ValueError:
-                result = {
-                    "raw": response.text[:8192]
-                }
-        else:
-            result = {
-                "raw": response.text[:8192]
+            return {
+                "status_code": response.status_code,
+                "route": route.name,
+                "result": result,
             }
 
+        authorization = await authorize_external_transport(
+            protocol="a2a",
+            tool_name=f"gateway.a2a.{route.name}",
+            route_name=route.name,
+            route_url=route.url,
+            tenant_id=uuid.UUID(tenant_id),
+            agent_id=uuid.UUID(agent_id),
+            agent_scopes=agent_scopes,
+            trace_id=trace_id,
+            payload=payload,
+            kind=ToolKind.CUSTOM,
+            send=send,
+        )
+
+        if authorization.decision == "allow":
+            return dict(authorization.value)
+
+        if authorization.decision == "error":
+            raise A2ARouteError("a2a_transport_execution_failed")
+
         return {
-            "status_code": response.status_code,
+            "status_code": 403,
             "route": route.name,
-            "result": result,
+            "error": authorization.error_code or "authorization_denied",
+            "reason": authorization.reason,
+            "proof": authorization.proof,
         }
 
     @staticmethod

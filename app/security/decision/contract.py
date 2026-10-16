@@ -133,6 +133,8 @@ class SecurityAction:
         provenance: dict[str, Any] | None = None,
         policy_hash: str = UNBOUND_HASH,
         capability_snapshot_hash: str = UNBOUND_HASH,
+        effective_capabilities: list[str] | None = None,
+        authority_token_hash: str | None = None,
     ) -> None:
 
         self.tenant_id = tenant_id
@@ -149,6 +151,12 @@ class SecurityAction:
         self.provenance = provenance or {}
         self.policy_hash = policy_hash
         self.capability_snapshot_hash = capability_snapshot_hash
+        self.effective_capabilities = (
+            sorted(set(effective_capabilities))
+            if effective_capabilities is not None
+            else None
+        )
+        self.authority_token_hash = authority_token_hash
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -172,6 +180,16 @@ class SecurityAction:
             "policy_hash": self.policy_hash,
             "capability_snapshot_hash": self.capability_snapshot_hash,
             "provenance": self.provenance,
+            **(
+                {"effective_capabilities": self.effective_capabilities}
+                if self.effective_capabilities is not None
+                else {}
+            ),
+            **(
+                {"authority_token_hash": self.authority_token_hash}
+                if self.authority_token_hash is not None
+                else {}
+            ),
         }
 
     def fingerprint(self) -> str:

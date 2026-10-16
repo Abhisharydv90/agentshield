@@ -69,6 +69,21 @@ class Settings(BaseSettings):
     # Security enforcement defaults to TRUE.
     JUDGE_ENFORCE: bool = True
 
+    # Maximum number of delegation hops an agent may retain.
+    # The value is interpreted as remaining delegation depth and is
+    # decremented on every delegated token hop.
+    AUTHORITY_MAX_DELEGATION_DEPTH: int = Field(
+        default=2,
+        ge=0,
+        le=16,
+    )
+
+    AUTHORITY_MAX_TOKEN_CHAIN_LENGTH: int = Field(
+        default=16,
+        ge=1,
+        le=32,
+    )
+
     # ---------------------------------------------------------
     # Injection detection
     # ---------------------------------------------------------

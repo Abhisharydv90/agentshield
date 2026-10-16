@@ -102,6 +102,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             exc,
         )
 
+    if settings.ENV == "prod" and not postgres_ok:
+        raise RuntimeError("database_unavailable")
+
     # --------------------------------------------------------
     # Redis
     # --------------------------------------------------------

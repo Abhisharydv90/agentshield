@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import socket
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -58,14 +59,40 @@ class BrowserPolicy:
             return BrowserPolicyDecision(False, "http_navigation_disabled")
 
         host = parsed.hostname.lower().rstrip(".")
-        if host in self.blocked_domains or any(self._host_matches(host, domain) for domain in self.blocked_domains):
+        if host in {"localhost", "localhost.localdomain", "ip6-localhost"}:
+            if not self.allow_private_ips:
+                return BrowserPolicyDecision(False, "private_or_local_ip_blocked")
+
+        if host in self.blocked_domains or any(
+            self._host_matches(host, domain)
+            for domain in self.blocked_domains
+        ):
             return BrowserPolicyDecision(False, "domain_blocked")
 
+        ip = None
         try:
             ip = ipaddress.ip_address(host)
         except ValueError:
-            ip = None
-        if ip is not None and not self.allow_private_ips and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved):
+            try:
+                # Accept legacy numeric IPv4 spellings so loopback/private
+                # targets cannot bypass the policy via integer/hex forms.
+                packed = socket.inet_aton(host)
+                ip = ipaddress.ip_address(packed)
+            except (OSError, ValueError):
+                ip = None
+
+        if (
+            ip is not None
+            and not self.allow_private_ips
+            and (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            )
+        ):
             return BrowserPolicyDecision(False, "private_or_local_ip_blocked")
 
         if self.allowed_domains:

@@ -41,8 +41,10 @@ class PrepareAnchorRequest(BaseModel):
 
 def _require_human_admin(request: Request) -> Any:
     user = getattr(request.state, "user", None)
-    if user is None:
+    if getattr(request.state, "auth_type", None) != "session" or user is None:
         raise HTTPException(status_code=403, detail="human_admin_required")
+    if getattr(user, "status", "inactive") != "active":
+        raise HTTPException(status_code=401, detail="principal_inactive")
 
     try:
         role = normalize_role(str(user.role))

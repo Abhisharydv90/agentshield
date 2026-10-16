@@ -17,6 +17,7 @@ runtime.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -43,6 +44,11 @@ from app.security.evidence.binding import (
 )
 
 
+_EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+_CARD_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+
+
 _SENSITIVE_KEY_MARKERS = (
     "password",
     "passwd",
@@ -55,6 +61,14 @@ _SENSITIVE_KEY_MARKERS = (
     "private_key",
     "credential",
     "cookie",
+    "email",
+    "phone",
+    "mobile",
+    "ssn",
+    "social_security",
+    "date_of_birth",
+    "dob",
+    "address",
 )
 
 
@@ -70,6 +84,11 @@ def _redact_approval_value(value: Any, key: str | None = None) -> Any:
         return [_redact_approval_value(v, None) for v in value]
     if isinstance(value, tuple):
         return [_redact_approval_value(v, None) for v in value]
+    if isinstance(value, str):
+        redacted = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", value)
+        redacted = _SSN_PATTERN.sub("[REDACTED_SSN]", redacted)
+        redacted = _CARD_PATTERN.sub("[REDACTED_CARD]", redacted)
+        return redacted
     return value
 
 
@@ -235,12 +254,26 @@ class SecurityDecisionEngine:
         if not self._agent_is_usable(agent):
             return build_result(SecurityDecision.DENY, "agent_unavailable")
 
+        effective_scopes = list(
+            action.effective_capabilities
+            if action.effective_capabilities is not None
+            else (agent.scopes or [])
+        )
+
+        if not set(effective_scopes).issubset(
+            set(agent.scopes or [])
+        ):
+            return build_result(
+                SecurityDecision.DENY,
+                "effective_capability_escalation",
+            )
+
         if action.capability_snapshot_hash != UNBOUND_HASH:
             expected_capability_hash = capability_snapshot_hash(
                 tenant_id=agent.tenant_id,
                 agent_id=agent.agent_id,
                 status=agent.status,
-                scopes=agent.scopes or [],
+                scopes=effective_scopes,
             )
             if action.capability_snapshot_hash != expected_capability_hash:
                 return build_result(
@@ -265,7 +298,7 @@ class SecurityDecisionEngine:
             return build_result(SecurityDecision.DENY, "unknown_operation")
 
         missing = missing_capabilities(
-            agent.scopes,
+            effective_scopes,
             required,
         )
 

@@ -92,7 +92,12 @@ class IsolationRunner:
     def __init__(self, lifecycle: ContainerLifecycle | None = None) -> None:
         self.lifecycle = lifecycle or ContainerLifecycle()
         self._history: dict[str, IsolationExecutionResult] = {}
-        self._active: set[str] = set()
+        # Ownership is security state: every execution id is bound to the
+        # authenticated tenant + agent that created it.
+        self._ownership: dict[str, tuple[uuid.UUID, uuid.UUID]] = {}
+        # Active executions also retain the selected backend so stop cannot
+        # be redirected to an unrelated/default backend.
+        self._active: dict[str, tuple[uuid.UUID, uuid.UUID, str]] = {}
         self._lock = asyncio.Lock()
 
     async def validate(
@@ -168,7 +173,11 @@ class IsolationRunner:
         )
 
         async with self._lock:
-            self._active.add(execution_id)
+            self._active[execution_id] = (
+                context.tenant_id,
+                context.agent_id,
+                policy.backend.value,
+            )
 
         started = time.monotonic()
         try:
@@ -225,19 +234,38 @@ class IsolationRunner:
             )
         finally:
             async with self._lock:
-                self._active.discard(execution_id)
+                self._active.pop(execution_id, None)
 
         async with self._lock:
             self._history[execution_id] = result
+            self._ownership[execution_id] = (
+                context.tenant_id,
+                context.agent_id,
+            )
             if len(self._history) > 2048:
                 oldest = next(iter(self._history))
                 self._history.pop(oldest, None)
+                self._ownership.pop(oldest, None)
 
         return result
 
-    async def stop(self, execution_id: str, *, backend_name: str = "docker") -> bool:
+    async def stop(
+        self,
+        execution_id: str,
+        *,
+        context: SecurityContext,
+    ) -> bool:
         async with self._lock:
-            if execution_id not in self._active:
+            active = self._active.get(execution_id)
+            if active is None:
+                return False
+
+            owner_tenant_id, owner_agent_id, backend_name = active
+
+            if (
+                owner_tenant_id != context.tenant_id
+                or owner_agent_id != context.agent_id
+            ):
                 return False
 
         await asyncio.to_thread(
@@ -247,8 +275,23 @@ class IsolationRunner:
         )
         return True
 
-    async def get(self, execution_id: str) -> IsolationExecutionResult | None:
+    async def get(
+        self,
+        execution_id: str,
+        *,
+        context: SecurityContext,
+    ) -> IsolationExecutionResult | None:
         async with self._lock:
+            owner = self._ownership.get(execution_id)
+            if owner is None:
+                return None
+
+            if owner != (
+                context.tenant_id,
+                context.agent_id,
+            ):
+                return None
+
             return self._history.get(execution_id)
 
     @staticmethod
@@ -256,9 +299,7 @@ class IsolationRunner:
         context: SecurityContext,
         request: IsolationExecutionRequest,
     ) -> None:
-        required = {"execute"}
-        if request.policy.mode == IsolationMode.PROCESS:
-            required.add("process:execute")
+        required = {"isolation:execute"}
 
         mounts = request.policy.mounts
         if mounts:

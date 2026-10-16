@@ -49,6 +49,7 @@ PERMISSIONS: dict[str, set[Role]] = {
         Role.MEMBER,
     },
 
+
     # --------------------------------------------------------
     # Tenant settings
     # --------------------------------------------------------
@@ -136,6 +137,17 @@ PERMISSIONS: dict[str, set[Role]] = {
     "tenant.webhooks.delete": {
         Role.OWNER,
         Role.ADMIN,
+    },
+
+    # --------------------------------------------------------
+    # Telemetry / security event observability
+    # --------------------------------------------------------
+    # Tenant security telemetry is sensitive operational data. It is
+    # available to authenticated human principals, not agent credentials.
+    "tenant.telemetry.read": {
+        Role.OWNER,
+        Role.ADMIN,
+        Role.MEMBER,
     },
 
     # --------------------------------------------------------

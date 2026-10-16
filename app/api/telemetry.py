@@ -22,8 +22,9 @@ from sqlalchemy import (
 
 from app.db.models import SecurityEvent
 from app.db.session import async_session
-from app.telemetry.audit import verify_chain
 from app.api.evidence import router as evidence_router
+from app.security.authorization import require_permission
+from app.telemetry.audit import verify_chain
 
 
 router = APIRouter(
@@ -48,6 +49,18 @@ def _require_tenant(
         )
 
     return tenant
+
+
+def _serialize_event(event: SecurityEvent) -> dict:
+    """Serialize a tenant event without exposing evaluator reasoning."""
+    return {
+        "event_id": str(event.event_id),
+        "request_id": event.request_id,
+        "timestamp": event.timestamp.isoformat(),
+        "threat_category": event.threat_category,
+        "action_taken": event.action_taken,
+        "record_hash": event.record_hash,
+    }
 
 
 @router.get("/metrics")
@@ -180,30 +193,7 @@ async def get_events(
         ).scalars().all()
 
         return [
-            {
-                "event_id":
-                    str(
-                        event.event_id
-                    ),
-
-                "request_id":
-                    event.request_id,
-
-                "timestamp":
-                    event.timestamp.isoformat(),
-
-                "threat_category":
-                    event.threat_category,
-
-                "action_taken":
-                    event.action_taken,
-
-                "evaluator_reasoning":
-                    event.evaluator_reasoning,
-
-                "record_hash":
-                    event.record_hash,
-            }
+            _serialize_event(event)
             for event in events
         ]
 
