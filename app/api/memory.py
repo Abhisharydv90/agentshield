@@ -150,12 +150,24 @@ def _parse_uuid(value: str, field: str) -> uuid.UUID:
 
 
 async def _security_context(request: Request) -> SecurityContext:
-    existing = getattr(request.state, "security_context", None)
-    if isinstance(existing, SecurityContext):
-        return existing
-
     tenant = getattr(request.state, "tenant", None)
     agent = getattr(request.state, "agent", None)
+
+    existing = getattr(request.state, "security_context", None)
+    if isinstance(existing, SecurityContext):
+        # Never accept a context that is inconsistent with the authenticated
+        # transport principal. A forged/misbound context must fail closed.
+        if (
+            tenant is None
+            or agent is None
+            or existing.tenant_id != tenant.tenant_id
+            or existing.agent_id != agent.agent_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="security_context_principal_mismatch",
+            )
+        return existing
     if tenant is None or agent is None:
         raise HTTPException(
             status_code=403,
