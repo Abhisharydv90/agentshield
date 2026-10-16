@@ -46,7 +46,8 @@ class TaskSubmitRequest(BaseModel):
     payload: Any = None
 
     metadata: dict[str, Any] = Field(
-        default_factory=dict
+        default_factory=dict,
+        max_length=100,
     )
 
     priority: int = 0
