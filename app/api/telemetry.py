@@ -154,7 +154,7 @@ async def get_events(
     limit: int = 50,
 ):
 
-    tenant = _require_human_telemetry_access(
+    tenant = _require_tenant(
         request
     )
 
