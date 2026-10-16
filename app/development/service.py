@@ -472,7 +472,8 @@ async def revoke_version(
         )
     ).scalars().all()
 
-    if row.status == "published" and not published:
+    was_published = row.status == "published"
+    if was_published and not published:
         raise ValueError("cannot_revoke_only_published_version")
 
     row.status = "revoked"
@@ -481,7 +482,7 @@ async def revoke_version(
     # set, switch to the newest remaining published version so runtime does
     # not retain capabilities from a revoked definition.
     if (
-        row.status == "revoked"
+        was_published
         and set(agent.scopes or []) == set(row.capabilities or [])
         and published
     ):
