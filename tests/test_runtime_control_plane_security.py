@@ -360,3 +360,36 @@ def test_runtime_metadata_and_workflow_graph_have_cardinality_bounds():
                 for i in range(201)
             ],
         )
+
+
+
+def test_runtime_payload_budget_rejects_oversized_json():
+    with pytest.raises(ValidationError):
+        runtime.TaskSubmitRequest(
+            kind="test",
+            payload={"data": "x" * (512 * 1024)},
+        )
+
+
+def test_workflow_input_budget_rejects_oversized_json():
+    with pytest.raises(ValidationError):
+        workflows.WorkflowStepRequest(
+            key="step",
+            task_kind="test",
+            agent_id=uuid.uuid4(),
+            config={"data": "x" * (128 * 1024)},
+        )
+
+    with pytest.raises(ValidationError):
+        workflows.WorkflowSubmitRequest(
+            name="workflow",
+            version="1",
+            steps=[
+                workflows.WorkflowStepRequest(
+                    key="step",
+                    task_kind="test",
+                    agent_id=uuid.uuid4(),
+                )
+            ],
+            input_payload={"data": "x" * (1024 * 1024)},
+        )
