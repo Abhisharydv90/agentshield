@@ -9,6 +9,7 @@ import pytest
 from starlette.requests import Request
 
 from app.api import runtime
+from app.api import workflows
 
 
 def _request(tenant_id: uuid.UUID, agent_id: uuid.UUID) -> Request:
@@ -208,3 +209,66 @@ async def test_close_session_allows_exact_agent_owner(monkeypatch):
         "session_id": str(session_id),
     }
     assert sessions.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_submission_hides_unexpected_exception(monkeypatch):
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+
+    class Engine:
+        async def submit_task(self, spec):
+            raise RuntimeError("secret database connection details")
+
+    async def fake_engine():
+        return Engine()
+
+    monkeypatch.setattr(runtime, "get_runtime_engine", fake_engine)
+
+    with pytest.raises(runtime.HTTPException) as exc_info:
+        await runtime.submit_task(
+            _request(tenant_id, agent_id),
+            runtime.TaskSubmitRequest(kind="test"),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "runtime_task_submission_failed"
+
+
+@pytest.mark.asyncio
+async def test_workflow_submission_hides_unexpected_exception(monkeypatch):
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+
+    class Workflows:
+        async def submit(self, **kwargs):
+            raise RuntimeError("secret scheduler/database details")
+
+    class Engine:
+        workflows = Workflows()
+
+    async def fake_engine():
+        return Engine()
+
+    monkeypatch.setattr(workflows, "get_runtime_engine", fake_engine)
+
+    body = workflows.WorkflowSubmitRequest(
+        name="test-workflow",
+        version="1",
+        steps=[
+            workflows.WorkflowStepRequest(
+                key="step-1",
+                task_kind="test",
+                agent_id=agent_id,
+            )
+        ],
+    )
+
+    with pytest.raises(workflows.HTTPException) as exc_info:
+        await workflows.submit_workflow(
+            _request(tenant_id, agent_id),
+            body,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "workflow_submission_failed"
