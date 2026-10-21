@@ -99,6 +99,10 @@ class TaskScheduler:
             asyncio.Task,
         ] = {}
 
+        # A task is invisible to dispatch until its dependency edges are
+        # durably registered. This closes the create/queue/dependency race.
+        self._submitting: set[uuid.UUID] = set()
+
         self.recovery = RecoveryManager(
             store
         )
@@ -164,30 +168,32 @@ class TaskScheduler:
                 "scheduler_not_running"
             )
 
-        record = await self.store.create_task(
-            spec
-        )
-
-        if record.status in {
-            TaskStatus.CREATED,
-            TaskStatus.RETRYING,
-        }:
-            LifecycleManager.queue(
-                record
+        self._submitting.add(spec.task_id)
+        try:
+            record = await self.store.create_task(
+                spec
             )
 
-            await self.store.save_task(
-                record
-            )
+            for dependency_id in (dependencies or []):
+                await self.store.add_dependency(
+                    spec.tenant_id,
+                    spec.task_id,
+                    dependency_id,
+                )
 
-        for dependency_id in (
-            dependencies or []
-        ):
-            await self.store.add_dependency(
-                spec.tenant_id,
-                spec.task_id,
-                dependency_id,
-            )
+            if record.status in {
+                TaskStatus.CREATED,
+                TaskStatus.RETRYING,
+            }:
+                LifecycleManager.queue(
+                    record
+                )
+
+                await self.store.save_task(
+                    record
+                )
+        finally:
+            self._submitting.discard(spec.task_id)
 
         await self.store.append_runtime_event(
             tenant_id=spec.tenant_id,
@@ -344,6 +350,8 @@ class TaskScheduler:
                 tenant_id
             )
             for record in blocked:
+                if record.task_id in self._submitting:
+                    continue
                 latest = await self.store.get_task(tenant_id, record.task_id)
                 if latest is None or latest.status not in {
                     TaskStatus.CREATED,
@@ -391,7 +399,8 @@ class TaskScheduler:
             )
 
             candidates.extend(
-                rows
+                record for record in rows
+                if record.task_id not in self._submitting
             )
 
         candidates.sort(
