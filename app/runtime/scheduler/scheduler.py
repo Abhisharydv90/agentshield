@@ -205,7 +205,11 @@ class TaskScheduler:
         except Exception:
             # Never let a partially submitted task become runnable without
             # all of its declared dependency edges.
-            if record is not None and not record.is_terminal:
+            if (
+                record is not None
+                and record.task_id == spec.task_id
+                and not record.is_terminal
+            ):
                 latest = await self.store.get_task(
                     spec.tenant_id,
                     spec.task_id,
