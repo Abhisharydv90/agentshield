@@ -99,6 +99,10 @@ class TaskScheduler:
             asyncio.Task,
         ] = {}
 
+        # A task is invisible to dispatch until its dependency edges are
+        # durably registered. This closes the create/queue/dependency race.
+        self._submitting: set[uuid.UUID] = set()
+
         self.recovery = RecoveryManager(
             store
         )
@@ -164,30 +168,65 @@ class TaskScheduler:
                 "scheduler_not_running"
             )
 
-        record = await self.store.create_task(
-            spec
-        )
-
-        if record.status in {
-            TaskStatus.CREATED,
-            TaskStatus.RETRYING,
-        }:
-            LifecycleManager.queue(
-                record
+        self._submitting.add(spec.task_id)
+        record = None
+        try:
+            record = await self.store.create_task(
+                spec
             )
 
-            await self.store.save_task(
-                record
-            )
+            requested_dependencies = set(dependencies or [])
+            if record.task_id != spec.task_id:
+                existing_dependencies = await self.store.list_task_dependencies(
+                    spec.tenant_id,
+                    record.task_id,
+                )
+                if existing_dependencies != requested_dependencies:
+                    raise ValueError("idempotency_dependency_conflict")
+                # This is a replay of an already persisted request. Do not
+                # mutate the existing task or attempt to attach edges to the
+                # replay's newly generated, non-persisted task ID.
+                return record
 
-        for dependency_id in (
-            dependencies or []
-        ):
-            await self.store.add_dependency(
-                spec.tenant_id,
-                spec.task_id,
-                dependency_id,
-            )
+            for dependency_id in requested_dependencies:
+                await self.store.add_dependency(
+                    spec.tenant_id,
+                    spec.task_id,
+                    dependency_id,
+                )
+
+            if record.status in {
+                TaskStatus.CREATED,
+                TaskStatus.RETRYING,
+            }:
+                LifecycleManager.queue(
+                    record
+                )
+
+                await self.store.save_task(
+                    record
+                )
+        except Exception:
+            # Never let a partially submitted task become runnable without
+            # all of its declared dependency edges.
+            if (
+                record is not None
+                and record.task_id == spec.task_id
+                and not record.is_terminal
+            ):
+                latest = await self.store.get_task(
+                    spec.tenant_id,
+                    spec.task_id,
+                )
+                if latest is not None and not latest.is_terminal:
+                    LifecycleManager.block(
+                        latest,
+                        error_code="submission_failed",
+                    )
+                    await self.store.save_task(latest)
+            raise
+        finally:
+            self._submitting.discard(spec.task_id)
 
         await self.store.append_runtime_event(
             tenant_id=spec.tenant_id,
@@ -270,6 +309,7 @@ class TaskScheduler:
     async def _run_loop(self) -> None:
         while self._running:
             try:
+                await self._resolve_failed_dependencies()
                 candidates = (
                     await self._collect_candidates()
                 )
@@ -335,6 +375,40 @@ class TaskScheduler:
 
         return callback
 
+    async def _resolve_failed_dependencies(self) -> None:
+        """Block queued tasks whose prerequisite can no longer succeed."""
+        tenants = await self.store.list_active_tenants()
+        for tenant_id in tenants:
+            blocked = await self.store.list_tasks_with_failed_dependencies(
+                tenant_id
+            )
+            for record in blocked:
+                if record.task_id in self._submitting:
+                    continue
+                latest = await self.store.get_task(tenant_id, record.task_id)
+                if latest is None or latest.status not in {
+                    TaskStatus.CREATED,
+                    TaskStatus.QUEUED,
+                    TaskStatus.RETRYING,
+                }:
+                    continue
+                LifecycleManager.block(
+                    latest,
+                    error_code="dependency_failed",
+                )
+                await self.store.save_task(latest)
+                await self.store.append_runtime_event(
+                    tenant_id=tenant_id,
+                    trace_id=latest.trace_id,
+                    event_type="task.blocked",
+                    payload_hash=latest.spec.payload_hash,
+                    metadata={
+                        "task_id": str(latest.task_id),
+                        "reason": "dependency_failed",
+                    },
+                    task_id=latest.task_id,
+                )
+
     async def _collect_candidates(
         self,
     ) -> list[TaskRecord]:
@@ -358,7 +432,8 @@ class TaskScheduler:
             )
 
             candidates.extend(
-                rows
+                record for record in rows
+                if record.task_id not in self._submitting
             )
 
         candidates.sort(
@@ -525,13 +600,22 @@ class TaskScheduler:
                         latest is not None
                         and not latest.is_terminal
                     ):
-                        LifecycleManager.cancel(
-                            latest
-                        )
+                        if not self._running:
+                            # Process shutdown is not a user cancellation.
+                            # Return interrupted work to the bounded retry
+                            # policy so it can resume after restart.
+                            await self.recovery.handle_failure(
+                                latest,
+                                error_code="scheduler_shutdown",
+                            )
+                        else:
+                            LifecycleManager.cancel(
+                                latest
+                            )
 
-                        await self.store.save_task(
-                            latest
-                        )
+                            await self.store.save_task(
+                                latest
+                            )
 
                 raise
 

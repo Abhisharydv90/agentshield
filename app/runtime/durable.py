@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from sqlalchemy import and_, func, select, update
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Agent
@@ -52,6 +53,25 @@ from app.runtime.tasks import (
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _same_idempotent_request(existing: TaskSpec, incoming: TaskSpec) -> bool:
+    """Idempotency keys may replay the same request, never redefine it."""
+    return (
+        existing.tenant_id == incoming.tenant_id
+        and existing.agent_id == incoming.agent_id
+        and existing.kind == incoming.kind
+        and existing.payload_hash == incoming.payload_hash
+        and dict(existing.metadata) == dict(incoming.metadata)
+        and existing.session_id == incoming.session_id
+        and existing.workflow_run_id == incoming.workflow_run_id
+        and existing.workflow_step_key == incoming.workflow_step_key
+        and existing.trace_id == incoming.trace_id
+        and existing.priority == incoming.priority
+        and existing.timeout_seconds == incoming.timeout_seconds
+        and existing.max_attempts == incoming.max_attempts
+        and existing.payload_ref == incoming.payload_ref
+    )
 
 
 # ============================================================
@@ -88,6 +108,19 @@ class RuntimeStore(Protocol):
         *,
         limit: int = 100,
     ) -> list[TaskRecord]:
+        ...
+
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        ...
+
+    async def list_task_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+        task_id: uuid.UUID,
+    ) -> set[uuid.UUID]:
         ...
 
     async def list_active_tenants(
@@ -250,9 +283,9 @@ class InMemoryRuntimeStore:
                         and record.spec.idempotency_key
                         == spec.idempotency_key
                     ):
-                        return copy.deepcopy(
-                            record
-                        )
+                        if not _same_idempotent_request(record.spec, spec):
+                            raise ValueError("idempotency_key_conflict")
+                        return copy.deepcopy(record)
 
             record = TaskRecord(
                 spec=spec,
@@ -404,6 +437,54 @@ class InMemoryRuntimeStore:
                 },
                 key=str,
             )
+
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        """Return queued tasks with prerequisites that cannot succeed."""
+        async with self._lock:
+            failed = []
+            eligible = {
+                TaskStatus.CREATED,
+                TaskStatus.QUEUED,
+                TaskStatus.RETRYING,
+            }
+            terminal_failures = {
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.BLOCKED,
+            }
+            for task_id, dependencies in self._dependencies.items():
+                child = self._tasks.get(task_id)
+                if child is None or child.tenant_id != tenant_id:
+                    continue
+                if child.status not in eligible:
+                    continue
+                for dependency_id in dependencies:
+                    parent = self._tasks.get(dependency_id)
+                    if (
+                        parent is not None
+                        and parent.tenant_id == tenant_id
+                        and parent.status in terminal_failures
+                    ):
+                        failed.append(copy.deepcopy(child))
+                        break
+            return failed
+
+
+    async def list_task_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+        task_id: uuid.UUID,
+    ) -> set[uuid.UUID]:
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return set()
+            if task.tenant_id != tenant_id:
+                raise PermissionError("cross_tenant_task_access")
+            return set(self._dependencies.get(task_id, set()))
 
     async def add_dependency(
         self,
@@ -756,6 +837,20 @@ class PostgresRuntimeStore:
                     ).scalar_one_or_none()
 
                     if existing is not None:
+                        if not (
+                            existing.agent_id == spec.agent_id
+                            and existing.kind == spec.kind
+                            and existing.payload_hash == spec.payload_hash
+                            and dict(existing.metadata_redacted or {}) == build_task_metadata(spec)
+                            and existing.session_id == spec.session_id
+                            and existing.workflow_run_id == spec.workflow_run_id
+                            and existing.workflow_step_key == spec.workflow_step_key
+                            and existing.trace_id == spec.effective_trace_id
+                            and existing.priority == spec.priority
+                            and existing.timeout_seconds == spec.timeout_seconds
+                            and existing.max_attempts == spec.max_attempts
+                        ):
+                            raise ValueError("idempotency_key_conflict")
                         return self._task_from_row(
                             existing,
                             spec=spec,
@@ -949,6 +1044,48 @@ class PostgresRuntimeStore:
 
             return ready
 
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        """Return queued tasks with terminally failed prerequisites."""
+        eligible = [
+            TaskStatus.CREATED.value,
+            TaskStatus.QUEUED.value,
+            TaskStatus.RETRYING.value,
+        ]
+        terminal = [
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+            TaskStatus.BLOCKED.value,
+        ]
+        parent = aliased(RuntimeTask, name="dependency_parent")
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    select(RuntimeTask)
+                    .join(
+                        RuntimeTaskDependency,
+                        and_(
+                            RuntimeTaskDependency.task_id == RuntimeTask.task_id,
+                            RuntimeTaskDependency.tenant_id == RuntimeTask.tenant_id,
+                        ),
+                    )
+                    .join(
+                        parent,
+                        and_(
+                            RuntimeTaskDependency.depends_on_task_id == parent.task_id,
+                            RuntimeTaskDependency.tenant_id == parent.tenant_id,
+                        ),
+                    )
+                    .where(RuntimeTask.tenant_id == tenant_id)
+                    .where(RuntimeTask.status.in_(eligible))
+                    .where(parent.status.in_(terminal))
+                    .distinct()
+                )
+            ).scalars().all()
+            return [self._task_from_row(row) for row in rows]
+
     async def list_active_tenants(
         self,
     ) -> list[uuid.UUID]:
@@ -978,6 +1115,30 @@ class PostgresRuntimeStore:
                 },
                 key=str,
             )
+
+    async def list_task_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+        task_id: uuid.UUID,
+    ) -> set[uuid.UUID]:
+        async with async_session() as session:
+            task_exists = (
+                await session.execute(
+                    select(RuntimeTask.task_id)
+                    .where(RuntimeTask.tenant_id == tenant_id)
+                    .where(RuntimeTask.task_id == task_id)
+                )
+            ).scalar_one_or_none()
+            if task_exists is None:
+                return set()
+            rows = (
+                await session.execute(
+                    select(RuntimeTaskDependency.depends_on_task_id)
+                    .where(RuntimeTaskDependency.tenant_id == tenant_id)
+                    .where(RuntimeTaskDependency.task_id == task_id)
+                )
+            ).scalars().all()
+            return set(rows)
 
     async def add_dependency(
         self,
