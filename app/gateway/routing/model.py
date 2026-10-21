@@ -1,4 +1,4 @@
-﻿"""
+"""
 AURAGENT model route registry.
 
 The request supplies a logical route name.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -256,9 +257,27 @@ class ModelRouteRegistry:
     def _validate_route(
         route: ModelRoute,
     ) -> None:
-        parsed = urlparse(
-            route.base_url
-        )
+        if not route.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", route.name):
+            raise ModelRouteError("invalid_model_route_name")
+        if not route.provider.strip():
+            raise ModelRouteError("invalid_model_route_provider")
+        if not 1 <= route.timeout_seconds <= 300:
+            raise ModelRouteError(f"invalid_model_route_timeout:{route.name}")
+        parsed = urlparse(route.base_url)
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ModelRouteError(f"invalid_model_route_url_components:{route.name}")
+        path = urlparse(route.chat_path)
+        if path.scheme or path.netloc or not route.chat_path.startswith("/") or route.chat_path.startswith("//"):
+            raise ModelRouteError(f"invalid_model_route_path:{route.name}")
+        reserved = {"authorization", "proxy-authorization", "host", "content-length", "connection", "transfer-encoding"}
+        for key, value in route.static_headers.items():
+            normalized = key.strip().lower()
+            if not normalized or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-zA-Z-]+", key):
+                raise ModelRouteError(f"invalid_model_header_name:{route.name}")
+            if normalized in reserved:
+                raise ModelRouteError(f"reserved_model_header:{normalized}")
+            if any((ord(ch) < 32 and ch != "\t") or ord(ch) == 127 for ch in value):
+                raise ModelRouteError(f"invalid_model_header_value:{route.name}")
 
         if parsed.scheme not in {
             "http",
@@ -284,15 +303,11 @@ class ModelRouteRegistry:
                 f"insecure_model_route_in_prod:{route.name}"
             )
 
-        if not parsed.netloc:
+        if not parsed.hostname or not parsed.netloc:
             raise ModelRouteError(
                 f"invalid_model_route_host:{route.name}"
             )
 
-        if not 1 <= route.timeout_seconds <= 300:
-            raise ModelRouteError(
-                f"invalid_model_route_timeout:{route.name}"
-            )
 
 
 _model_routes = ModelRouteRegistry()

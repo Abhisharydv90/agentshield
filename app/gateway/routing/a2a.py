@@ -1,4 +1,4 @@
-﻿"""
+"""
 AURAGENT A2A transport routing.
 
 Phase 3 selects the target and transports the request.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -226,6 +227,19 @@ class A2ARouter:
     def _validate(
         route: A2ARoute,
     ) -> None:
+        if not route.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", route.name):
+            raise A2ARouteError("invalid_a2a_route_name")
+        if not 1 <= route.timeout_seconds <= 300:
+            raise A2ARouteError("invalid_a2a_route_timeout")
+        reserved = {"content-type", "accept", "x-trace-id", "x-auragent-tenant", "x-auragent-agent", "host", "content-length", "connection", "transfer-encoding"}
+        for key, value in route.headers.items():
+            normalized = key.strip().lower()
+            if not normalized or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-zA-Z-]+", key):
+                raise A2ARouteError("invalid_a2a_header_name")
+            if normalized in reserved:
+                raise A2ARouteError(f"reserved_a2a_header:{normalized}")
+            if any((ord(ch) < 32 and ch != "\t") or ord(ch) == 127 for ch in value):
+                raise A2ARouteError("invalid_a2a_header_value")
         parsed = urlparse(
             route.url
         )
@@ -254,9 +268,9 @@ class A2ARouter:
                 f"insecure_a2a_route_in_prod:{route.name}"
             )
 
-        if not parsed.netloc:
+        if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise A2ARouteError(
-                f"invalid_a2a_host:{route.name}"
+                f"invalid_a2a_url_components:{route.name}"
             )
 
 

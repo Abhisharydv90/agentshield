@@ -1,4 +1,4 @@
-﻿"""
+"""
 AURAGENT Gateway request validation.
 
 The Gateway validates structure and resource limits.
@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     field_validator,
 )
@@ -181,8 +182,7 @@ class GatewayModelRequest(BaseModel):
 
     stream: bool = False
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
     @field_validator("model")
     @classmethod

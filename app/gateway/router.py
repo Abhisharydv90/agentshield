@@ -1,4 +1,4 @@
-﻿"""
+"""
 AURAGENT unified Gateway.
 
 Entry point:
@@ -29,6 +29,7 @@ security pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -249,15 +250,19 @@ async def _observe(
         - started_ms
     )
 
-    await gateway_metrics.observe(
-        GatewayObservation(
-            target_kind=target_kind,
-            target_name=target_name,
-            status_code=status_code,
-            latency_ms=latency_ms,
-            outcome=outcome,
+    try:
+        await gateway_metrics.observe(
+            GatewayObservation(
+                target_kind=target_kind,
+                target_name=target_name,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                outcome=outcome,
+            )
         )
-    )
+    except Exception:
+        # Metrics are best-effort and must not change the request result.
+        pass
 
     request_id = str(
         uuid.uuid4()
@@ -297,6 +302,20 @@ async def _observe(
 # Quota wrapping
 # ============================================================
 
+def _transport_http_status(result: dict, upstream_status: int) -> int:
+    """Keep policy denials visible; do not disguise them as upstream failures."""
+    if upstream_status < 400:
+        return 200
+    error = str(result.get("error", "")).lower()
+    if upstream_status == 403 and (
+        error == "missing_capabilities"
+        or error == "authorization_denied"
+        or error.startswith("capability_")
+    ):
+        return 403
+    return 502
+
+
 def _wrap_streaming_release(
     response: StreamingResponse,
     *,
@@ -307,46 +326,37 @@ def _wrap_streaming_release(
     original_iterator = response.body_iterator
 
     async def wrapped_iterator():
-        started_ms = observation[
-            "started_ms"
-        ]
+        started_ms = observation["started_ms"]
+        outcome = "allowed"
 
         try:
             async for chunk in original_iterator:
                 yield chunk
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception:
+            outcome = "stream_error"
+            raise
         finally:
-            await quota_manager.release(
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-            )
-
-            await _observe(
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                target_kind=observation[
-                    "target_kind"
-                ],
-                target_name=observation[
-                    "target_name"
-                ],
-                status_code=(
-                    getattr(
-                        response,
-                        "status_code",
-                        200,
-                    )
-                ),
-                started_ms=started_ms,
-                outcome=(
-                    "allowed"
-                    if getattr(
-                        response,
-                        "status_code",
-                        200,
-                    ) < 400
-                    else "error"
-                ),
-            )
+            try:
+                await quota_manager.release(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                )
+            finally:
+                status_code = getattr(response, "status_code", 200)
+                if status_code >= 400 and outcome == "allowed":
+                    outcome = "error"
+                await _observe(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    target_kind=observation["target_kind"],
+                    target_name=observation["target_name"],
+                    status_code=status_code,
+                    started_ms=started_ms,
+                    outcome=outcome,
+                )
 
     response.body_iterator = (
         wrapped_iterator()
@@ -387,6 +397,18 @@ async def dispatch(
                     quota.retry_after_seconds
                 ),
             },
+        )
+
+    quota_released = False
+
+    async def release_quota_once() -> None:
+        nonlocal quota_released
+        if quota_released:
+            return
+        quota_released = True
+        await quota_manager.release(
+            tenant_id=tenant.tenant_id,
+            agent_id=agent.agent_id,
         )
 
     started_ms = (
@@ -440,10 +462,7 @@ async def dispatch(
                 200,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             await _observe(
                 tenant_id=tenant.tenant_id,
@@ -483,10 +502,7 @@ async def dispatch(
                 metadata=body.metadata,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             await _observe(
                 tenant_id=tenant.tenant_id,
@@ -531,10 +547,7 @@ async def dispatch(
                 payload=body.payload,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             status_code = int(
                 result.get(
@@ -558,11 +571,7 @@ async def dispatch(
             )
 
             return JSONResponse(
-                status_code=(
-                    200
-                    if status_code < 400
-                    else 502
-                ),
+                status_code=_transport_http_status(result, status_code),
                 content=result,
             )
 
@@ -594,10 +603,7 @@ async def dispatch(
                 payload=body.payload,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             status_code = int(
                 result.get(
@@ -640,10 +646,7 @@ async def dispatch(
         MCPRouteError,
         A2ARouteError,
     ) as exc:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
 
         await _observe(
             tenant_id=tenant.tenant_id,
@@ -660,19 +663,17 @@ async def dispatch(
             detail=str(exc),
         ) from exc
 
+    except asyncio.CancelledError:
+        await release_quota_once()
+        raise
+
     except HTTPException:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
 
         raise
 
     except Exception:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
 
         await _observe(
             tenant_id=tenant.tenant_id,
@@ -735,13 +736,31 @@ async def model_chat_completions(
         route_name
     )
 
+    quota_released = False
+
+    async def release_quota_once() -> None:
+        nonlocal quota_released
+        if quota_released:
+            return
+        quota_released = True
+        await quota_manager.release(
+            tenant_id=tenant.tenant_id,
+            agent_id=agent.agent_id,
+        )
+
     started_ms = (
         time.perf_counter() * 1000
     )
 
-    response = await chat_completions(
-        request
-    )
+    try:
+        response = await chat_completions(request)
+    except asyncio.CancelledError:
+        await release_quota_once()
+        raise
+    except Exception:
+        await release_quota_once()
+        await _observe(tenant_id=tenant.tenant_id, agent_id=agent.agent_id, target_kind="model", target_name=route_name, status_code=502, started_ms=started_ms, outcome="upstream_error")
+        raise
 
     if isinstance(
         response,
@@ -758,10 +777,7 @@ async def model_chat_completions(
             },
         )
 
-    await quota_manager.release(
-        tenant_id=tenant.tenant_id,
-        agent_id=agent.agent_id,
-    )
+    await release_quota_once()
 
     status_code = getattr(
         response,
