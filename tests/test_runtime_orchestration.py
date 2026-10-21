@@ -641,3 +641,66 @@ def test_workflow_validation_returns_deterministic_topological_plan():
     plan = engine.validate(spec)
     assert plan.ordered_steps.index("parent") < plan.ordered_steps.index("child")
     assert plan.workflow_id == engine.validate(spec).workflow_id
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_direct_dependency_cycle():
+    store = InMemoryRuntimeStore()
+    tenant_id = uuid.uuid4()
+    first = make_spec(tenant_id=tenant_id, kind="first")
+    second = make_spec(tenant_id=tenant_id, kind="second")
+    await store.create_task(first)
+    await store.create_task(second)
+
+    await store.add_dependency(tenant_id, first.task_id, second.task_id)
+    with pytest.raises(ValueError, match="task_dependency_cycle"):
+        await store.add_dependency(tenant_id, second.task_id, first.task_id)
+
+    assert await store.list_task_dependencies(tenant_id, first.task_id) == {
+        second.task_id
+    }
+    assert await store.list_task_dependencies(tenant_id, second.task_id) == set()
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_indirect_dependency_cycle():
+    store = InMemoryRuntimeStore()
+    tenant_id = uuid.uuid4()
+    first = make_spec(tenant_id=tenant_id, kind="first")
+    second = make_spec(tenant_id=tenant_id, kind="second")
+    third = make_spec(tenant_id=tenant_id, kind="third")
+    for spec in (first, second, third):
+        await store.create_task(spec)
+
+    # first depends on second; second depends on third.
+    await store.add_dependency(tenant_id, first.task_id, second.task_id)
+    await store.add_dependency(tenant_id, second.task_id, third.task_id)
+
+    # third -> first would close the transitive cycle.
+    with pytest.raises(ValueError, match="task_dependency_cycle"):
+        await store.add_dependency(tenant_id, third.task_id, first.task_id)
+
+    assert await store.list_task_dependencies(tenant_id, third.task_id) == set()
+
+
+@pytest.mark.asyncio
+async def test_store_allows_acyclic_dependency_graph_and_duplicate_edge():
+    store = InMemoryRuntimeStore()
+    tenant_id = uuid.uuid4()
+    root = make_spec(tenant_id=tenant_id, kind="root")
+    middle = make_spec(tenant_id=tenant_id, kind="middle")
+    leaf = make_spec(tenant_id=tenant_id, kind="leaf")
+    for spec in (root, middle, leaf):
+        await store.create_task(spec)
+
+    await store.add_dependency(tenant_id, middle.task_id, root.task_id)
+    await store.add_dependency(tenant_id, leaf.task_id, middle.task_id)
+    # Re-registering an existing edge is idempotent.
+    await store.add_dependency(tenant_id, leaf.task_id, middle.task_id)
+
+    assert await store.list_task_dependencies(tenant_id, middle.task_id) == {
+        root.task_id
+    }
+    assert await store.list_task_dependencies(tenant_id, leaf.task_id) == {
+        middle.task_id
+    }
