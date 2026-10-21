@@ -388,7 +388,10 @@ async def dispatch(
         if quota_released:
             return
         quota_released = True
-        await release_quota_once()
+        await quota_manager.release(
+            tenant_id=tenant.tenant_id,
+            agent_id=agent.agent_id,
+        )
 
     started_ms = (
         time.perf_counter() * 1000
@@ -726,7 +729,10 @@ async def model_chat_completions(
         if quota_released:
             return
         quota_released = True
-        await release_quota_once()
+        await quota_manager.release(
+            tenant_id=tenant.tenant_id,
+            agent_id=agent.agent_id,
+        )
 
     started_ms = (
         time.perf_counter() * 1000
@@ -735,10 +741,10 @@ async def model_chat_completions(
     try:
         response = await chat_completions(request)
     except asyncio.CancelledError:
-        await quota_manager.release(tenant_id=tenant.tenant_id, agent_id=agent.agent_id)
+        await release_quota_once()
         raise
     except Exception:
-        await quota_manager.release(tenant_id=tenant.tenant_id, agent_id=agent.agent_id)
+        await release_quota_once()
         await _observe(tenant_id=tenant.tenant_id, agent_id=agent.agent_id, target_kind="model", target_name=route_name, status_code=502, started_ms=started_ms, outcome="upstream_error")
         raise
 
