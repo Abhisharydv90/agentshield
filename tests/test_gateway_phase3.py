@@ -89,3 +89,73 @@ async def test_stream_failure_releases_quota_and_records_failure(monkeypatch):
     assert released == [(tenant_id, agent_id)]
     assert observed[0]["outcome"] == "stream_error"
     assert observed[0]["target_name"] == "default"
+
+
+def test_model_route_rejects_malformed_header_token():
+    route = ModelRoute(
+        name="safe",
+        provider="openai-compatible",
+        base_url="https://models.example.test",
+        static_headers={"X Bad": "value"},
+    )
+    with pytest.raises(ModelRouteError, match="invalid_model_header_name"):
+        ModelRouteRegistry._validate_route(route)
+
+
+def test_mcp_route_rejects_query_string_in_endpoint():
+    route = MCPRoute(name="safe", url="https://mcp.example.test/rpc?token=secret")
+    with pytest.raises(MCPRouteError, match="invalid_mcp_url_components"):
+        MCPRouter._validate(route)
+
+
+def test_a2a_route_rejects_query_string_in_endpoint():
+    route = A2ARoute(name="safe", url="https://a2a.example.test/receive?token=secret")
+    with pytest.raises(A2ARouteError, match="invalid_a2a_url_components"):
+        A2ARouter._validate(route)
+
+
+def test_transport_status_preserves_authorization_denial():
+    assert gateway_module._transport_http_status(
+        {"error": "missing_capabilities"}, 403
+    ) == 403
+    assert gateway_module._transport_http_status(
+        {"error": "upstream_error"}, 403
+    ) == 502
+    assert gateway_module._transport_http_status({}, 200) == 200
+
+
+@pytest.mark.asyncio
+async def test_metrics_failure_does_not_break_observation(monkeypatch):
+    async def fail_metrics(_observation):
+        raise RuntimeError("metrics backend down")
+
+    class FakeSession:
+        def add(self, _row):
+            pass
+
+        async def commit(self):
+            pass
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        gateway_module.gateway_metrics, "observe", fail_metrics
+    )
+    monkeypatch.setattr(
+        gateway_module, "async_session", lambda: FakeSessionContext()
+    )
+
+    await gateway_module._observe(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        target_kind="model",
+        target_name="default",
+        status_code=200,
+        started_ms=1.0,
+        outcome="allowed",
+    )
