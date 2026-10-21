@@ -250,15 +250,19 @@ async def _observe(
         - started_ms
     )
 
-    await gateway_metrics.observe(
-        GatewayObservation(
-            target_kind=target_kind,
-            target_name=target_name,
-            status_code=status_code,
-            latency_ms=latency_ms,
-            outcome=outcome,
+    try:
+        await gateway_metrics.observe(
+            GatewayObservation(
+                target_kind=target_kind,
+                target_name=target_name,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                outcome=outcome,
+            )
         )
-    )
+    except Exception:
+        # Metrics are best-effort and must not change the request result.
+        pass
 
     request_id = str(
         uuid.uuid4()
@@ -297,6 +301,20 @@ async def _observe(
 # ============================================================
 # Quota wrapping
 # ============================================================
+
+def _transport_http_status(result: dict, upstream_status: int) -> int:
+    """Keep policy denials visible; do not disguise them as upstream failures."""
+    if upstream_status < 400:
+        return 200
+    error = str(result.get("error", "")).lower()
+    if upstream_status == 403 and (
+        error == "missing_capabilities"
+        or error == "authorization_denied"
+        or error.startswith("capability_")
+    ):
+        return 403
+    return 502
+
 
 def _wrap_streaming_release(
     response: StreamingResponse,
@@ -553,11 +571,7 @@ async def dispatch(
             )
 
             return JSONResponse(
-                status_code=(
-                    200
-                    if status_code < 400
-                    else 502
-                ),
+                status_code=_transport_http_status(result, status_code),
                 content=result,
             )
 
