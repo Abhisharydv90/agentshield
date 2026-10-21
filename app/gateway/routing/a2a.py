@@ -268,9 +268,9 @@ class A2ARouter:
                 f"insecure_a2a_route_in_prod:{route.name}"
             )
 
-        if not parsed.netloc:
+        if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
             raise A2ARouteError(
-                f"invalid_a2a_host:{route.name}"
+                f"invalid_a2a_url_components:{route.name}"
             )
 
 
