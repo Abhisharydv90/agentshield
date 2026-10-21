@@ -139,6 +139,52 @@ async def test_store_scopes_task_reads_to_tenant():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_rejects_idempotency_replay_with_different_dependencies():
+    store = InMemoryRuntimeStore()
+    tenant_id = uuid.uuid4()
+    parent_a = make_spec(tenant_id=tenant_id, kind="parent.a")
+    parent_b = make_spec(tenant_id=tenant_id, kind="parent.b")
+    await store.create_task(parent_a)
+    await store.create_task(parent_b)
+
+    scheduler = TaskScheduler(
+        store, executor=lambda task: task.spec.kind,
+        poll_interval_seconds=0.005,
+    )
+    first_spec = make_spec(
+        tenant_id=tenant_id,
+        idempotency_key="same-request",
+        kind="child",
+        payload={"x": 1},
+    )
+    replay_spec = make_spec(
+        tenant_id=tenant_id,
+        idempotency_key="same-request",
+        kind="child",
+        payload={"x": 1},
+    )
+
+    await scheduler.start()
+    try:
+        first = await scheduler.submit(
+            first_spec, dependencies=[parent_a.task_id]
+        )
+        with pytest.raises(ValueError, match="idempotency_dependency_conflict"):
+            await scheduler.submit(
+                replay_spec, dependencies=[parent_b.task_id]
+            )
+
+        persisted = await store.get_task(tenant_id, first.task_id)
+        assert persisted is not None
+        assert persisted.last_error_code != "submission_failed"
+        assert await store.list_task_dependencies(tenant_id, first.task_id) == {
+            parent_a.task_id
+        }
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_store_rejects_idempotency_key_reuse_for_different_payload():
     store = InMemoryRuntimeStore()
     original = make_spec(
