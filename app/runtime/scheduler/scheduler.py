@@ -169,6 +169,7 @@ class TaskScheduler:
             )
 
         self._submitting.add(spec.task_id)
+        record = None
         try:
             record = await self.store.create_task(
                 spec
@@ -192,6 +193,21 @@ class TaskScheduler:
                 await self.store.save_task(
                     record
                 )
+        except Exception:
+            # Never let a partially submitted task become runnable without
+            # all of its declared dependency edges.
+            if record is not None and not record.is_terminal:
+                latest = await self.store.get_task(
+                    spec.tenant_id,
+                    spec.task_id,
+                )
+                if latest is not None and not latest.is_terminal:
+                    LifecycleManager.block(
+                        latest,
+                        error_code="submission_failed",
+                    )
+                    await self.store.save_task(latest)
+            raise
         finally:
             self._submitting.discard(spec.task_id)
 
