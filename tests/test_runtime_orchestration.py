@@ -140,6 +140,41 @@ async def test_store_scopes_task_reads_to_tenant():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_accepts_idempotent_replay_with_same_dependencies():
+    store = InMemoryRuntimeStore()
+    tenant_id = uuid.uuid4()
+    parent = make_spec(tenant_id=tenant_id, kind="parent")
+    await store.create_task(parent)
+
+    scheduler = TaskScheduler(
+        store, executor=lambda task: task.spec.kind,
+        poll_interval_seconds=0.005,
+    )
+    original = make_spec(
+        tenant_id=tenant_id,
+        idempotency_key="replay-same",
+        kind="child",
+        payload={"x": 1},
+    )
+    replay = replace(original, task_id=uuid.uuid4())
+
+    await scheduler.start()
+    try:
+        first = await scheduler.submit(
+            original, dependencies=[parent.task_id]
+        )
+        second = await scheduler.submit(
+            replay, dependencies=[parent.task_id]
+        )
+        assert second.task_id == first.task_id
+        assert await store.list_task_dependencies(tenant_id, first.task_id) == {
+            parent.task_id
+        }
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_rejects_idempotency_replay_with_different_dependencies():
     store = InMemoryRuntimeStore()
     tenant_id = uuid.uuid4()
