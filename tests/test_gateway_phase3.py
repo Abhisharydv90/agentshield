@@ -4,6 +4,9 @@ import uuid
 
 import pytest
 
+from fastapi.responses import StreamingResponse
+
+from app.gateway import router as gateway_module
 from app.gateway.quotas import GatewayQuotaManager
 from app.gateway.routing.a2a import A2ARoute, A2ARouteError, A2ARouter
 from app.gateway.routing.mcp import MCPRoute, MCPRouteError, MCPRouter
@@ -50,3 +53,39 @@ async def test_quota_release_is_idempotent_and_never_negative():
     await manager.release(tenant_id=tenant_id, agent_id=agent_id)
     snapshot = await manager.snapshot(tenant_id=tenant_id, agent_id=agent_id)
     assert snapshot["inflight"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_releases_quota_and_records_failure(monkeypatch):
+    released = []
+    observed = []
+
+    class FakeQuotaManager:
+        async def release(self, *, tenant_id, agent_id):
+            released.append((tenant_id, agent_id))
+
+    async def observe(**kwargs):
+        observed.append(kwargs)
+
+    async def failing_body():
+        yield b"first"
+        raise RuntimeError("upstream stream failed")
+
+    monkeypatch.setattr(gateway_module, "quota_manager", FakeQuotaManager())
+    monkeypatch.setattr(gateway_module, "_observe", observe)
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    response = StreamingResponse(failing_body())
+    wrapped = gateway_module._wrap_streaming_release(
+        response,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        observation={"target_kind": "model", "target_name": "default", "started_ms": 1.0},
+    )
+
+    with pytest.raises(RuntimeError, match="upstream stream failed"):
+        async for _ in wrapped.body_iterator:
+            pass
+
+    assert released == [(tenant_id, agent_id)]
+    assert observed[0]["outcome"] == "stream_error"
+    assert observed[0]["target_name"] == "default"
