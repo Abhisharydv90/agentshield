@@ -361,6 +361,43 @@ async def test_scheduler_blocks_child_after_parent_cancellation():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_propagates_failure_through_dependency_chain():
+    store = InMemoryRuntimeStore()
+
+    async def executor(task):
+        if task.spec.kind == "root":
+            raise RuntimeError("root failed")
+        return task.spec.kind
+
+    scheduler = TaskScheduler(
+        store, executor=executor, poll_interval_seconds=0.005
+    )
+    tenant_id = uuid.uuid4()
+    root = make_spec(tenant_id=tenant_id, kind="root", max_attempts=1)
+    middle = make_spec(tenant_id=tenant_id, kind="middle")
+    leaf = make_spec(tenant_id=tenant_id, kind="leaf")
+
+    await scheduler.start()
+    try:
+        await scheduler.submit(root)
+        await scheduler.submit(middle, dependencies=[root.task_id])
+        await scheduler.submit(leaf, dependencies=[middle.task_id])
+
+        await wait_for_status(store, tenant_id, root.task_id, TaskStatus.FAILED)
+        middle_record = await wait_for_status(
+            store, tenant_id, middle.task_id, TaskStatus.BLOCKED
+        )
+        leaf_record = await wait_for_status(
+            store, tenant_id, leaf.task_id, TaskStatus.BLOCKED
+        )
+
+        assert middle_record.last_error_code == "dependency_failed"
+        assert leaf_record.last_error_code == "dependency_failed"
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_cancels_running_task():
     store = InMemoryRuntimeStore()
     started = asyncio.Event()
