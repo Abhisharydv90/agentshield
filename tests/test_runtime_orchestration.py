@@ -540,6 +540,31 @@ async def test_scheduler_propagates_failure_through_dependency_chain():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_shutdown_retries_interrupted_running_task():
+    store = InMemoryRuntimeStore()
+    started = asyncio.Event()
+
+    async def executor(task):
+        started.set()
+        await asyncio.Event().wait()
+
+    scheduler = TaskScheduler(
+        store, executor=executor, poll_interval_seconds=0.005
+    )
+    spec = make_spec(max_attempts=3)
+    await scheduler.start()
+    await scheduler.submit(spec)
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await scheduler.stop()
+
+    record = await store.get_task(spec.tenant_id, spec.task_id)
+    assert record is not None
+    assert record.status == TaskStatus.RETRYING
+    assert record.last_error_code == "scheduler_shutdown"
+    assert record.attempt_count == 1
+
+
 async def test_scheduler_cancels_running_task():
     store = InMemoryRuntimeStore()
     started = asyncio.Event()
