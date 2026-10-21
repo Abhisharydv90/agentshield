@@ -175,7 +175,16 @@ class TaskScheduler:
                 spec
             )
 
-            for dependency_id in (dependencies or []):
+            requested_dependencies = set(dependencies or [])
+            if record.task_id != spec.task_id:
+                existing_dependencies = await self.store.list_task_dependencies(
+                    spec.tenant_id,
+                    record.task_id,
+                )
+                if existing_dependencies != requested_dependencies:
+                    raise ValueError("idempotency_dependency_conflict")
+
+            for dependency_id in requested_dependencies:
                 await self.store.add_dependency(
                     spec.tenant_id,
                     spec.task_id,
