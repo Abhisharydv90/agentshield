@@ -55,6 +55,25 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _same_idempotent_request(existing: TaskSpec, incoming: TaskSpec) -> bool:
+    """Idempotency keys may replay the same request, never redefine it."""
+    return (
+        existing.tenant_id == incoming.tenant_id
+        and existing.agent_id == incoming.agent_id
+        and existing.kind == incoming.kind
+        and existing.payload_hash == incoming.payload_hash
+        and dict(existing.metadata) == dict(incoming.metadata)
+        and existing.session_id == incoming.session_id
+        and existing.workflow_run_id == incoming.workflow_run_id
+        and existing.workflow_step_key == incoming.workflow_step_key
+        and existing.trace_id == incoming.trace_id
+        and existing.priority == incoming.priority
+        and existing.timeout_seconds == incoming.timeout_seconds
+        and existing.max_attempts == incoming.max_attempts
+        and existing.payload_ref == incoming.payload_ref
+    )
+
+
 # ============================================================
 # Store protocol
 # ============================================================
@@ -257,9 +276,9 @@ class InMemoryRuntimeStore:
                         and record.spec.idempotency_key
                         == spec.idempotency_key
                     ):
-                        return copy.deepcopy(
-                            record
-                        )
+                        if not _same_idempotent_request(record.spec, spec):
+                            raise ValueError("idempotency_key_conflict")
+                        return copy.deepcopy(record)
 
             record = TaskRecord(
                 spec=spec,
@@ -798,6 +817,20 @@ class PostgresRuntimeStore:
                     ).scalar_one_or_none()
 
                     if existing is not None:
+                        if not (
+                            existing.agent_id == spec.agent_id
+                            and existing.kind == spec.kind
+                            and existing.payload_hash == spec.payload_hash
+                            and dict(existing.metadata_redacted or {}) == build_task_metadata(spec)
+                            and existing.session_id == spec.session_id
+                            and existing.workflow_run_id == spec.workflow_run_id
+                            and existing.workflow_step_key == spec.workflow_step_key
+                            and existing.trace_id == spec.effective_trace_id
+                            and existing.priority == spec.priority
+                            and existing.timeout_seconds == spec.timeout_seconds
+                            and existing.max_attempts == spec.max_attempts
+                        ):
+                            raise ValueError("idempotency_key_conflict")
                         return self._task_from_row(
                             existing,
                             spec=spec,
