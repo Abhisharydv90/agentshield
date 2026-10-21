@@ -600,13 +600,22 @@ class TaskScheduler:
                         latest is not None
                         and not latest.is_terminal
                     ):
-                        LifecycleManager.cancel(
-                            latest
-                        )
+                        if not self._running:
+                            # Process shutdown is not a user cancellation.
+                            # Return interrupted work to the bounded retry
+                            # policy so it can resume after restart.
+                            await self.recovery.handle_failure(
+                                latest,
+                                error_code="scheduler_shutdown",
+                            )
+                        else:
+                            LifecycleManager.cancel(
+                                latest
+                            )
 
-                        await self.store.save_task(
-                            latest
-                        )
+                            await self.store.save_task(
+                                latest
+                            )
 
                 raise
 
