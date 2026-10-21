@@ -172,8 +172,13 @@ class LifecycleManager:
         )
 
     @staticmethod
-    def block(record: TaskRecord) -> TaskRecord:
-        return LifecycleManager.transition(
+    def block(
+        record: TaskRecord,
+        error_code: str = "dependency_failed",
+    ) -> TaskRecord:
+        LifecycleManager.transition(
             record,
             TaskStatus.BLOCKED,
         )
+        record.last_error_code = error_code
+        return record
