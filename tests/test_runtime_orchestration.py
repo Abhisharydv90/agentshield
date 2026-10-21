@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -157,11 +158,10 @@ async def test_scheduler_rejects_idempotency_replay_with_different_dependencies(
         kind="child",
         payload={"x": 1},
     )
-    replay_spec = make_spec(
-        tenant_id=tenant_id,
-        idempotency_key="same-request",
-        kind="child",
-        payload={"x": 1},
+    # Same logical request and identity; only the generated task ID differs.
+    replay_spec = replace(
+        first_spec,
+        task_id=uuid.uuid4(),
     )
 
     await scheduler.start()
