@@ -381,6 +381,15 @@ async def dispatch(
             },
         )
 
+    quota_released = False
+
+    async def release_quota_once() -> None:
+        nonlocal quota_released
+        if quota_released:
+            return
+        quota_released = True
+        await release_quota_once()
+
     started_ms = (
         time.perf_counter() * 1000
     )
@@ -432,10 +441,7 @@ async def dispatch(
                 200,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             await _observe(
                 tenant_id=tenant.tenant_id,
@@ -475,10 +481,7 @@ async def dispatch(
                 metadata=body.metadata,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             await _observe(
                 tenant_id=tenant.tenant_id,
@@ -523,10 +526,7 @@ async def dispatch(
                 payload=body.payload,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             status_code = int(
                 result.get(
@@ -586,10 +586,7 @@ async def dispatch(
                 payload=body.payload,
             )
 
-            await quota_manager.release(
-                tenant_id=tenant.tenant_id,
-                agent_id=agent.agent_id,
-            )
+            await release_quota_once()
 
             status_code = int(
                 result.get(
@@ -632,10 +629,7 @@ async def dispatch(
         MCPRouteError,
         A2ARouteError,
     ) as exc:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
 
         await _observe(
             tenant_id=tenant.tenant_id,
@@ -653,25 +647,16 @@ async def dispatch(
         ) from exc
 
     except asyncio.CancelledError:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
         raise
 
     except HTTPException:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
 
         raise
 
     except Exception:
-        await quota_manager.release(
-            tenant_id=tenant.tenant_id,
-            agent_id=agent.agent_id,
-        )
+        await release_quota_once()
 
         await _observe(
             tenant_id=tenant.tenant_id,
@@ -734,6 +719,15 @@ async def model_chat_completions(
         route_name
     )
 
+    quota_released = False
+
+    async def release_quota_once() -> None:
+        nonlocal quota_released
+        if quota_released:
+            return
+        quota_released = True
+        await release_quota_once()
+
     started_ms = (
         time.perf_counter() * 1000
     )
@@ -763,10 +757,7 @@ async def model_chat_completions(
             },
         )
 
-    await quota_manager.release(
-        tenant_id=tenant.tenant_id,
-        agent_id=agent.agent_id,
-    )
+    await release_quota_once()
 
     status_code = getattr(
         response,
