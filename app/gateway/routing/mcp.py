@@ -261,9 +261,9 @@ class MCPRouter:
                 f"insecure_mcp_route_in_prod:{route.name}"
             )
 
-        if not parsed.netloc:
+        if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
             raise MCPRouteError(
-                f"invalid_mcp_host:{route.name}"
+                f"invalid_mcp_url_components:{route.name}"
             )
 
 
