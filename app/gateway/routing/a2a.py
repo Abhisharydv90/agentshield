@@ -228,18 +228,18 @@ class A2ARouter:
         route: A2ARoute,
     ) -> None:
         if not route.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", route.name):
-            raise A2ARouteError(f"invalid_A2A_route_name")
+            raise A2ARouteError("invalid_a2a_route_name")
         if not 1 <= route.timeout_seconds <= 300:
-            raise A2ARouteError(f"invalid_A2A_route_timeout")
-        reserved = {{"content-type", "accept", "x-trace-id", "x-auragent-tenant", "x-auragent-agent", "host", "content-length", "connection", "transfer-encoding"}}
+            raise A2ARouteError("invalid_a2a_route_timeout")
+        reserved = {"content-type", "accept", "x-trace-id", "x-auragent-tenant", "x-auragent-agent", "host", "content-length", "connection", "transfer-encoding"}
         for key, value in route.headers.items():
             normalized = key.strip().lower()
             if not normalized or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-zA-Z-]+", key):
-                raise A2ARouteError(f"invalid_A2A_header_name")
+                raise A2ARouteError("invalid_a2a_header_name")
             if normalized in reserved:
-                raise A2ARouteError(f"reserved_A2A_header:{normalized}")
-            if "\\r" in value or "\\n" in value:
-                raise A2ARouteError(f"invalid_A2A_header_value")
+                raise A2ARouteError(f"reserved_a2a_header:{normalized}")
+            if "\r" in value or "\n" in value:
+                raise A2ARouteError("invalid_a2a_header_value")
         parsed = urlparse(
             route.url
         )
