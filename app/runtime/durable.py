@@ -523,6 +523,24 @@ class InMemoryRuntimeStore:
                     "cross_tenant_task_dependency"
                 )
 
+            # An edge task -> dependency is valid only when dependency
+            # cannot already reach task. Check while holding the store lock
+            # so concurrent submissions cannot create a cycle in memory.
+            existing_dependencies = self._dependencies.get(task_id, set())
+            if depends_on_task_id in existing_dependencies:
+                return
+
+            pending = [depends_on_task_id]
+            visited: set[uuid.UUID] = set()
+            while pending:
+                current = pending.pop()
+                if current == task_id:
+                    raise ValueError("task_dependency_cycle")
+                if current in visited:
+                    continue
+                visited.add(current)
+                pending.extend(self._dependencies.get(current, set()))
+
             self._dependencies.setdefault(
                 task_id,
                 set(),
@@ -1184,6 +1202,48 @@ class PostgresRuntimeStore:
                 raise KeyError(
                     "task_dependency_not_found"
                 )
+
+            # Serialize dependency-edge mutations per tenant. Without this
+            # transaction-scoped lock, concurrent inserts can each pass the
+            # reachability check and jointly create a cycle.
+            await session.execute(
+                select(
+                    func.pg_advisory_xact_lock(
+                        func.hashtext(str(tenant_id))
+                    )
+                )
+            )
+
+            existing_edges = (
+                await session.execute(
+                    select(
+                        RuntimeTaskDependency.task_id,
+                        RuntimeTaskDependency.depends_on_task_id,
+                    )
+                    .where(
+                        RuntimeTaskDependency.tenant_id == tenant_id
+                    )
+                )
+            ).all()
+
+            adjacency: dict[uuid.UUID, set[uuid.UUID]] = {}
+            for edge_task_id, edge_dependency_id in existing_edges:
+                adjacency.setdefault(edge_task_id, set()).add(edge_dependency_id)
+
+            if depends_on_task_id in adjacency.get(task_id, set()):
+                await session.rollback()
+                return
+
+            pending = [depends_on_task_id]
+            visited: set[uuid.UUID] = set()
+            while pending:
+                current = pending.pop()
+                if current == task_id:
+                    raise ValueError("task_dependency_cycle")
+                if current in visited:
+                    continue
+                visited.add(current)
+                pending.extend(adjacency.get(current, set()))
 
             session.add(
                 RuntimeTaskDependency(
