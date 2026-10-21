@@ -35,7 +35,7 @@ def test_mcp_route_rejects_reserved_identity_header():
 
 
 def test_a2a_route_rejects_newline_in_header_value():
-    route = A2ARoute(name="safe", url="https://a2a.example.test", headers={"X-Extra": "safe\\r\\nX-Injected: yes"})
+    route = A2ARoute(name="safe", url="https://a2a.example.test", headers={"X-Extra": "safe\r\nX-Injected: yes"})
     with pytest.raises(A2ARouteError, match="invalid_a2a_header_value"):
         A2ARouter._validate(route)
 
