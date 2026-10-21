@@ -139,6 +139,44 @@ async def test_store_scopes_task_reads_to_tenant():
 
 
 @pytest.mark.asyncio
+async def test_store_rejects_idempotency_key_reuse_for_different_payload():
+    store = InMemoryRuntimeStore()
+    original = make_spec(
+        idempotency_key="request-123",
+        payload={"operation": "read"},
+    )
+    await store.create_task(original)
+
+    conflicting = make_spec(
+        tenant_id=original.tenant_id,
+        agent_id=original.agent_id,
+        idempotency_key="request-123",
+        payload={"operation": "delete"},
+    )
+    with pytest.raises(ValueError, match="idempotency_key_conflict"):
+        await store.create_task(conflicting)
+
+
+@pytest.mark.asyncio
+async def test_store_returns_existing_task_for_same_idempotent_request():
+    store = InMemoryRuntimeStore()
+    original = make_spec(
+        idempotency_key="request-456",
+        payload={"operation": "read"},
+    )
+    first = await store.create_task(original)
+    replay = make_spec(
+        tenant_id=original.tenant_id,
+        agent_id=original.agent_id,
+        idempotency_key="request-456",
+        payload={"operation": "read"},
+    )
+
+    second = await store.create_task(replay)
+    assert second.task_id == first.task_id
+
+
+@pytest.mark.asyncio
 async def test_store_rejects_cross_tenant_dependency():
     store = InMemoryRuntimeStore()
     parent = make_spec()
