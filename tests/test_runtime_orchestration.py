@@ -361,6 +361,29 @@ async def test_scheduler_blocks_child_after_parent_cancellation():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_blocks_partial_submission_when_dependency_is_missing():
+    store = InMemoryRuntimeStore()
+    scheduler = TaskScheduler(
+        store, executor=lambda task: "must not execute",
+        poll_interval_seconds=0.005,
+    )
+    spec = make_spec()
+    missing_parent_id = uuid.uuid4()
+
+    await scheduler.start()
+    try:
+        with pytest.raises(KeyError, match="task_dependency_not_found"):
+            await scheduler.submit(spec, dependencies=[missing_parent_id])
+
+        record = await wait_for_status(
+            store, spec.tenant_id, spec.task_id, TaskStatus.BLOCKED
+        )
+        assert record.last_error_code == "submission_failed"
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_propagates_failure_through_dependency_chain():
     store = InMemoryRuntimeStore()
 
