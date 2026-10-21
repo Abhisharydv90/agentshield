@@ -97,48 +97,6 @@ class RuntimeStore(Protocol):
     ) -> list[TaskRecord]:
         ...
 
-    async def list_tasks_with_failed_dependencies(
-        self,
-        tenant_id: uuid.UUID,
-    ) -> list[TaskRecord]:
-        """Return queued tasks with failed/cancelled prerequisites."""
-        eligible = [
-            TaskStatus.CREATED.value,
-            TaskStatus.QUEUED.value,
-            TaskStatus.RETRYING.value,
-        ]
-        terminal_failures = [
-            TaskStatus.FAILED.value,
-            TaskStatus.CANCELLED.value,
-            TaskStatus.BLOCKED.value,
-        ]
-        parent = aliased(RuntimeTask, name="dependency_parent")
-        async with async_session() as session:
-            rows = (
-                await session.execute(
-                    select(RuntimeTask)
-                    .join(
-                        RuntimeTaskDependency,
-                        and_(
-                            RuntimeTaskDependency.task_id == RuntimeTask.task_id,
-                            RuntimeTaskDependency.tenant_id == RuntimeTask.tenant_id,
-                        ),
-                    )
-                    .join(
-                        parent,
-                        and_(
-                            RuntimeTaskDependency.depends_on_task_id == parent.task_id,
-                            RuntimeTaskDependency.tenant_id == parent.tenant_id,
-                        ),
-                    )
-                    .where(RuntimeTask.tenant_id == tenant_id)
-                    .where(RuntimeTask.status.in_(eligible))
-                    .where(parent.status.in_(terminal_failures))
-                    .distinct()
-                )
-            ).scalars().all()
-            return [self._task_from_row(row) for row in rows]
-
     async def list_active_tenants(
         self,
     ) -> list[uuid.UUID]:
@@ -1032,6 +990,48 @@ class PostgresRuntimeStore:
                 )
 
             return ready
+
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        """Return queued tasks with terminally failed prerequisites."""
+        eligible = [
+            TaskStatus.CREATED.value,
+            TaskStatus.QUEUED.value,
+            TaskStatus.RETRYING.value,
+        ]
+        terminal = [
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+            TaskStatus.BLOCKED.value,
+        ]
+        parent = aliased(RuntimeTask, name="dependency_parent")
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    select(RuntimeTask)
+                    .join(
+                        RuntimeTaskDependency,
+                        and_(
+                            RuntimeTaskDependency.task_id == RuntimeTask.task_id,
+                            RuntimeTaskDependency.tenant_id == RuntimeTask.tenant_id,
+                        ),
+                    )
+                    .join(
+                        parent,
+                        and_(
+                            RuntimeTaskDependency.depends_on_task_id == parent.task_id,
+                            RuntimeTaskDependency.tenant_id == parent.tenant_id,
+                        ),
+                    )
+                    .where(RuntimeTask.tenant_id == tenant_id)
+                    .where(RuntimeTask.status.in_(eligible))
+                    .where(parent.status.in_(terminal))
+                    .distinct()
+                )
+            ).scalars().all()
+            return [self._task_from_row(row) for row in rows]
 
     async def list_active_tenants(
         self,
