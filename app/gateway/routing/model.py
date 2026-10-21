@@ -272,11 +272,11 @@ class ModelRouteRegistry:
         reserved = {"authorization", "proxy-authorization", "host", "content-length", "connection", "transfer-encoding"}
         for key, value in route.static_headers.items():
             normalized = key.strip().lower()
-            if not normalized or any(ch in key for ch in " \t\r\n:"):
+            if not normalized or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-zA-Z-]+", key):
                 raise ModelRouteError(f"invalid_model_header_name:{route.name}")
             if normalized in reserved:
                 raise ModelRouteError(f"reserved_model_header:{normalized}")
-            if "\r" in value or "\n" in value:
+            if any((ord(ch) < 32 and ch != "\t") or ord(ch) == 127 for ch in value):
                 raise ModelRouteError(f"invalid_model_header_value:{route.name}")
 
         if parsed.scheme not in {
@@ -303,15 +303,11 @@ class ModelRouteRegistry:
                 f"insecure_model_route_in_prod:{route.name}"
             )
 
-        if not parsed.netloc:
+        if not parsed.hostname or not parsed.netloc:
             raise ModelRouteError(
                 f"invalid_model_route_host:{route.name}"
             )
 
-        if not 1 <= route.timeout_seconds <= 300:
-            raise ModelRouteError(
-                f"invalid_model_route_timeout:{route.name}"
-            )
 
 
 _model_routes = ModelRouteRegistry()
