@@ -301,6 +301,58 @@ async def test_scheduler_honors_task_dependencies():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_blocks_child_after_parent_failure():
+    store = InMemoryRuntimeStore()
+    scheduler = TaskScheduler(
+        store, executor=lambda task: task.spec.kind, poll_interval_seconds=0.005
+    )
+    tenant_id = uuid.uuid4()
+    parent = make_spec(tenant_id=tenant_id, kind="parent", max_attempts=1)
+    child = make_spec(tenant_id=tenant_id, kind="child")
+    async def executor(task):
+        if task.spec.kind == "parent":
+            raise RuntimeError("parent failed")
+        return "child should never execute"
+    scheduler.executor = executor
+    await scheduler.start()
+    try:
+        await scheduler.submit(parent)
+        await scheduler.submit(child, dependencies=[parent.task_id])
+        await wait_for_status(store, tenant_id, parent.task_id, TaskStatus.FAILED)
+        blocked = await wait_for_status(
+            store, tenant_id, child.task_id, TaskStatus.BLOCKED
+        )
+        assert blocked.last_error_code == "dependency_failed"
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_blocks_child_after_parent_cancellation():
+    store = InMemoryRuntimeStore()
+    scheduler = TaskScheduler(
+        store, executor=lambda task: task.spec.kind, poll_interval_seconds=0.005
+    )
+    tenant_id = uuid.uuid4()
+    parent = make_spec(tenant_id=tenant_id, kind="parent")
+    child = make_spec(tenant_id=tenant_id, kind="child")
+    await scheduler.start()
+    try:
+        await scheduler.submit(parent)
+        await scheduler.submit(child, dependencies=[parent.task_id])
+        await wait_for_status(store, tenant_id, parent.task_id, TaskStatus.SUCCEEDED)
+        parent_record = await store.get_task(tenant_id, parent.task_id)
+        parent_record.status = TaskStatus.CANCELLED
+        await store.save_task(parent_record)
+        blocked = await wait_for_status(
+            store, tenant_id, child.task_id, TaskStatus.BLOCKED
+        )
+        assert blocked.last_error_code == "dependency_failed"
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_cancels_running_task():
     store = InMemoryRuntimeStore()
     started = asyncio.Event()
