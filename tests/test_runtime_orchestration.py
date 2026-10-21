@@ -330,8 +330,17 @@ async def test_scheduler_blocks_child_after_parent_failure():
 @pytest.mark.asyncio
 async def test_scheduler_blocks_child_after_parent_cancellation():
     store = InMemoryRuntimeStore()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def executor(task):
+        if task.spec.kind == "parent":
+            started.set()
+            await release.wait()
+        return task.spec.kind
+
     scheduler = TaskScheduler(
-        store, executor=lambda task: task.spec.kind, poll_interval_seconds=0.005
+        store, executor=executor, poll_interval_seconds=0.005
     )
     tenant_id = uuid.uuid4()
     parent = make_spec(tenant_id=tenant_id, kind="parent")
@@ -340,15 +349,14 @@ async def test_scheduler_blocks_child_after_parent_cancellation():
     try:
         await scheduler.submit(parent)
         await scheduler.submit(child, dependencies=[parent.task_id])
-        await wait_for_status(store, tenant_id, parent.task_id, TaskStatus.SUCCEEDED)
-        parent_record = await store.get_task(tenant_id, parent.task_id)
-        parent_record.status = TaskStatus.CANCELLED
-        await store.save_task(parent_record)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert await scheduler.cancel(tenant_id=tenant_id, task_id=parent.task_id)
         blocked = await wait_for_status(
             store, tenant_id, child.task_id, TaskStatus.BLOCKED
         )
         assert blocked.last_error_code == "dependency_failed"
     finally:
+        release.set()
         await scheduler.stop()
 
 
