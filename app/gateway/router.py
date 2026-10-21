@@ -308,46 +308,37 @@ def _wrap_streaming_release(
     original_iterator = response.body_iterator
 
     async def wrapped_iterator():
-        started_ms = observation[
-            "started_ms"
-        ]
+        started_ms = observation["started_ms"]
+        outcome = "allowed"
 
         try:
             async for chunk in original_iterator:
                 yield chunk
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception:
+            outcome = "stream_error"
+            raise
         finally:
-            await quota_manager.release(
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-            )
-
-            await _observe(
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                target_kind=observation[
-                    "target_kind"
-                ],
-                target_name=observation[
-                    "target_name"
-                ],
-                status_code=(
-                    getattr(
-                        response,
-                        "status_code",
-                        200,
-                    )
-                ),
-                started_ms=started_ms,
-                outcome=(
-                    "allowed"
-                    if getattr(
-                        response,
-                        "status_code",
-                        200,
-                    ) < 400
-                    else "error"
-                ),
-            )
+            try:
+                await quota_manager.release(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                )
+            finally:
+                status_code = getattr(response, "status_code", 200)
+                if status_code >= 400 and outcome == "allowed":
+                    outcome = "error"
+                await _observe(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    target_kind=observation["target_kind"],
+                    target_name=observation["target_name"],
+                    status_code=status_code,
+                    started_ms=started_ms,
+                    outcome=outcome,
+                )
 
     response.body_iterator = (
         wrapped_iterator()
