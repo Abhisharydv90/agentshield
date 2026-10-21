@@ -1,4 +1,4 @@
-﻿"""
+"""
 AURAGENT unified Gateway.
 
 Entry point:
@@ -29,6 +29,7 @@ security pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -739,9 +740,15 @@ async def model_chat_completions(
         time.perf_counter() * 1000
     )
 
-    response = await chat_completions(
-        request
-    )
+    try:
+        response = await chat_completions(request)
+    except asyncio.CancelledError:
+        await quota_manager.release(tenant_id=tenant.tenant_id, agent_id=agent.agent_id)
+        raise
+    except Exception:
+        await quota_manager.release(tenant_id=tenant.tenant_id, agent_id=agent.agent_id)
+        await _observe(tenant_id=tenant.tenant_id, agent_id=agent.agent_id, target_kind="model", target_name=route_name, status_code=502, started_ms=started_ms, outcome="upstream_error")
+        raise
 
     if isinstance(
         response,
