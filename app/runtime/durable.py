@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from sqlalchemy import and_, func, select, update
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Agent
@@ -89,6 +90,54 @@ class RuntimeStore(Protocol):
         limit: int = 100,
     ) -> list[TaskRecord]:
         ...
+
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        ...
+
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        """Return queued tasks with failed/cancelled prerequisites."""
+        eligible = [
+            TaskStatus.CREATED.value,
+            TaskStatus.QUEUED.value,
+            TaskStatus.RETRYING.value,
+        ]
+        terminal_failures = [
+            TaskStatus.FAILED.value,
+            TaskStatus.CANCELLED.value,
+            TaskStatus.BLOCKED.value,
+        ]
+        parent = aliased(RuntimeTask, name="dependency_parent")
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    select(RuntimeTask)
+                    .join(
+                        RuntimeTaskDependency,
+                        and_(
+                            RuntimeTaskDependency.task_id == RuntimeTask.task_id,
+                            RuntimeTaskDependency.tenant_id == RuntimeTask.tenant_id,
+                        ),
+                    )
+                    .join(
+                        parent,
+                        and_(
+                            RuntimeTaskDependency.depends_on_task_id == parent.task_id,
+                            RuntimeTaskDependency.tenant_id == parent.tenant_id,
+                        ),
+                    )
+                    .where(RuntimeTask.tenant_id == tenant_id)
+                    .where(RuntimeTask.status.in_(eligible))
+                    .where(parent.status.in_(terminal_failures))
+                    .distinct()
+                )
+            ).scalars().all()
+            return [self._task_from_row(row) for row in rows]
 
     async def list_active_tenants(
         self,
@@ -404,6 +453,41 @@ class InMemoryRuntimeStore:
                 },
                 key=str,
             )
+
+    async def list_tasks_with_failed_dependencies(
+        self,
+        tenant_id: uuid.UUID,
+    ) -> list[TaskRecord]:
+        """Return queued tasks with prerequisites that cannot succeed."""
+        async with self._lock:
+            failed = []
+            eligible = {
+                TaskStatus.CREATED,
+                TaskStatus.QUEUED,
+                TaskStatus.RETRYING,
+            }
+            terminal_failures = {
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.BLOCKED,
+            }
+            for task_id, dependencies in self._dependencies.items():
+                child = self._tasks.get(task_id)
+                if child is None or child.tenant_id != tenant_id:
+                    continue
+                if child.status not in eligible:
+                    continue
+                for dependency_id in dependencies:
+                    parent = self._tasks.get(dependency_id)
+                    if (
+                        parent is not None
+                        and parent.tenant_id == tenant_id
+                        and parent.status in terminal_failures
+                    ):
+                        failed.append(copy.deepcopy(child))
+                        break
+            return failed
+
 
     async def add_dependency(
         self,
