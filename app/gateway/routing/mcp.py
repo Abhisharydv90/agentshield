@@ -221,18 +221,18 @@ class MCPRouter:
         route: MCPRoute,
     ) -> None:
         if not route.name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", route.name):
-            raise MCPRouteError(f"invalid_MCP_route_name")
+            raise MCPRouteError("invalid_mcp_route_name")
         if not 1 <= route.timeout_seconds <= 300:
-            raise MCPRouteError(f"invalid_MCP_route_timeout")
-        reserved = {{"content-type", "accept", "x-trace-id", "x-auragent-tenant", "x-auragent-agent", "host", "content-length", "connection", "transfer-encoding"}}
+            raise MCPRouteError("invalid_mcp_route_timeout")
+        reserved = {"content-type", "accept", "x-trace-id", "x-auragent-tenant", "x-auragent-agent", "host", "content-length", "connection", "transfer-encoding"}
         for key, value in route.headers.items():
             normalized = key.strip().lower()
             if not normalized or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-zA-Z-]+", key):
-                raise MCPRouteError(f"invalid_MCP_header_name")
+                raise MCPRouteError("invalid_mcp_header_name")
             if normalized in reserved:
-                raise MCPRouteError(f"reserved_MCP_header:{normalized}")
-            if "\\r" in value or "\\n" in value:
-                raise MCPRouteError(f"invalid_MCP_header_value")
+                raise MCPRouteError(f"reserved_mcp_header:{normalized}")
+            if "\r" in value or "\n" in value:
+                raise MCPRouteError("invalid_mcp_header_value")
         parsed = urlparse(
             route.url
         )
