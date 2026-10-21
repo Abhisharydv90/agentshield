@@ -231,7 +231,7 @@ class MCPRouter:
                 raise MCPRouteError("invalid_mcp_header_name")
             if normalized in reserved:
                 raise MCPRouteError(f"reserved_mcp_header:{normalized}")
-            if "\r" in value or "\n" in value:
+            if any((ord(ch) < 32 and ch != "\t") or ord(ch) == 127 for ch in value):
                 raise MCPRouteError("invalid_mcp_header_value")
         parsed = urlparse(
             route.url
@@ -261,7 +261,7 @@ class MCPRouter:
                 f"insecure_mcp_route_in_prod:{route.name}"
             )
 
-        if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise MCPRouteError(
                 f"invalid_mcp_url_components:{route.name}"
             )
