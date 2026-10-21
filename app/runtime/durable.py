@@ -128,43 +128,6 @@ class RuntimeStore(Protocol):
     ) -> list[uuid.UUID]:
         ...
 
-    async def list_task_dependencies(
-        self,
-        tenant_id: uuid.UUID,
-        task_id: uuid.UUID,
-    ) -> set[uuid.UUID]:
-        async with self._lock:
-            task = self._tasks.get(task_id)
-            if task is None:
-                return set()
-            if task.tenant_id != tenant_id:
-                raise PermissionError("cross_tenant_task_access")
-            return set(self._dependencies.get(task_id, set()))
-
-    async def list_task_dependencies(
-        self,
-        tenant_id: uuid.UUID,
-        task_id: uuid.UUID,
-    ) -> set[uuid.UUID]:
-        async with async_session() as session:
-            task_exists = (
-                await session.execute(
-                    select(RuntimeTask.task_id)
-                    .where(RuntimeTask.tenant_id == tenant_id)
-                    .where(RuntimeTask.task_id == task_id)
-                )
-            ).scalar_one_or_none()
-            if task_exists is None:
-                return set()
-            rows = (
-                await session.execute(
-                    select(RuntimeTaskDependency.depends_on_task_id)
-                    .where(RuntimeTaskDependency.tenant_id == tenant_id)
-                    .where(RuntimeTaskDependency.task_id == task_id)
-                )
-            ).scalars().all()
-            return set(rows)
-
     async def add_dependency(
         self,
         tenant_id: uuid.UUID,
