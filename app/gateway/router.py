@@ -661,6 +661,13 @@ async def dispatch(
             detail=str(exc),
         ) from exc
 
+    except asyncio.CancelledError:
+        await quota_manager.release(
+            tenant_id=tenant.tenant_id,
+            agent_id=agent.agent_id,
+        )
+        raise
+
     except HTTPException:
         await quota_manager.release(
             tenant_id=tenant.tenant_id,
