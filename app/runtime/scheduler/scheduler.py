@@ -183,6 +183,10 @@ class TaskScheduler:
                 )
                 if existing_dependencies != requested_dependencies:
                     raise ValueError("idempotency_dependency_conflict")
+                # This is a replay of an already persisted request. Do not
+                # mutate the existing task or attempt to attach edges to the
+                # replay's newly generated, non-persisted task ID.
+                return record
 
             for dependency_id in requested_dependencies:
                 await self.store.add_dependency(
