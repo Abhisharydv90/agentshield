@@ -270,6 +270,7 @@ class TaskScheduler:
     async def _run_loop(self) -> None:
         while self._running:
             try:
+                await self._resolve_failed_dependencies()
                 candidates = (
                     await self._collect_candidates()
                 )
@@ -334,6 +335,38 @@ class TaskScheduler:
             )
 
         return callback
+
+    async def _resolve_failed_dependencies(self) -> None:
+        """Block queued tasks whose prerequisite can no longer succeed."""
+        tenants = await self.store.list_active_tenants()
+        for tenant_id in tenants:
+            blocked = await self.store.list_tasks_with_failed_dependencies(
+                tenant_id
+            )
+            for record in blocked:
+                latest = await self.store.get_task(tenant_id, record.task_id)
+                if latest is None or latest.status not in {
+                    TaskStatus.CREATED,
+                    TaskStatus.QUEUED,
+                    TaskStatus.RETRYING,
+                }:
+                    continue
+                LifecycleManager.block(
+                    latest,
+                    error_code="dependency_failed",
+                )
+                await self.store.save_task(latest)
+                await self.store.append_runtime_event(
+                    tenant_id=tenant_id,
+                    trace_id=latest.trace_id,
+                    event_type="task.blocked",
+                    payload_hash=latest.spec.payload_hash,
+                    metadata={
+                        "task_id": str(latest.task_id),
+                        "reason": "dependency_failed",
+                    },
+                    task_id=latest.task_id,
+                )
 
     async def _collect_candidates(
         self,
