@@ -19,27 +19,15 @@ const securityHeaders = [
   },
 ];
 
-/* ============================================================
-   Next.js configuration
-   ============================================================ */
-
 const nextConfig: NextConfig = {
-  /* --- Core --- */
   reactStrictMode: true,
   poweredByHeader: false,
   compress: true,
   productionBrowserSourceMaps: false,
-  
-
-  /* --- Build strictness --- */
   typescript: {
     ignoreBuildErrors: false,
   },
-
-  /* --- Turbopack (Next.js 16 default) — empty config = use defaults --- */
   turbopack: {},
-
-  /* --- Image optimization --- */
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "cdn.jsdelivr.net" },
@@ -48,47 +36,29 @@ const nextConfig: NextConfig = {
     formats: ["image/avif", "image/webp"],
     minimumCacheTTL: 60 * 60 * 24 * 30,
   },
-
-    /* --- Bundle optimization --- */
   experimental: {
-    optimizePackageImports: [
-      "lucide-react",
-      "recharts",
-      "date-fns",
-    ],
+    optimizePackageImports: ["lucide-react", "recharts", "date-fns"],
   },
-
-  /* --- Security headers on every response --- */
   async headers() {
     return [
+      { source: "/:path*", headers: securityHeaders },
       {
-        source: "/:path*",
-        headers: securityHeaders,
-      },
-      {
-        /* Never cache API responses */
         source: "/api/:path*",
         headers: [{ key: "Cache-Control", value: "no-store, max-age=0" }],
       },
     ];
   },
-
-  /* --- API proxy: forward /api/* and /v1/* to the FastAPI backend --- */
-      async rewrites() {
+  async rewrites() {
     const isProd = process.env.NODE_ENV === "production";
     const backend = isProd
       ? "https://agentshield-production-0091.up.railway.app"
       : "http://localhost:8000";
 
     return [
-      {
-        source: "/api/:path*",
-        destination: `${backend}/api/:path*`,
-      },
-      {
-        source: "/v1/:path*",
-        destination: `${backend}/v1/:path*`,
-      },
+      { source: "/health", destination: `${backend}/health` },
+      { source: "/ready", destination: `${backend}/ready` },
+      { source: "/api/:path*", destination: `${backend}/api/:path*` },
+      { source: "/v1/:path*", destination: `${backend}/v1/:path*` },
     ];
   },
 };
