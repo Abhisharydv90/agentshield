@@ -165,7 +165,14 @@ export default function PlatformHubPage() {
   });
   const [checkedAt, setCheckedAt] = useState<string>("");
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<{
+    health: Probe;
+    readiness: Probe;
+    checkedAt: string;
+  }> => {
+    let nextHealth: Probe;
+    let nextReadiness: Probe;
+
     try {
       const response = await fetch("/health", {
         cache: "no-store",
@@ -173,15 +180,15 @@ export default function PlatformHubPage() {
       });
       if (!response.ok) throw new Error(`Health endpoint returned ${response.status}`);
       const body = await response.json();
-      setHealth({
+      nextHealth = {
         status: body.status === "ok" ? "online" : "degraded",
         detail: `${body.platform ?? "API"} · ${body.component ?? "service"} · v${body.version ?? "unknown"}`,
-      });
+      };
     } catch (error) {
-      setHealth({
+      nextHealth = {
         status: "offline",
         detail: error instanceof Error ? error.message : "Health check failed",
-      });
+      };
     }
 
     try {
@@ -194,24 +201,45 @@ export default function PlatformHubPage() {
       const passed = checks ? Object.values(checks).filter(Boolean).length : 0;
       const total = checks ? Object.keys(checks).length : 0;
       const allReady = response.ok && body.status === "ready";
-      setReadiness({
+      nextReadiness = {
         status: allReady ? "online" : total > 0 ? "degraded" : "offline",
         detail: total > 0
           ? `${passed}/${total} readiness checks passed`
           : body.status ?? `Readiness endpoint returned ${response.status}`,
-      });
+      };
     } catch (error) {
-      setReadiness({
+      nextReadiness = {
         status: "offline",
         detail: error instanceof Error ? error.message : "Readiness check failed",
-      });
+      };
     }
-    setCheckedAt(new Date().toLocaleTimeString());
+
+    return {
+      health: nextHealth,
+      readiness: nextReadiness,
+      checkedAt: new Date().toLocaleTimeString(),
+    };
+  }, []);
+
+  const applyProbeResults = useCallback((result: {
+    health: Probe;
+    readiness: Probe;
+    checkedAt: string;
+  }) => {
+    setHealth(result.health);
+    setReadiness(result.readiness);
+    setCheckedAt(result.checkedAt);
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let active = true;
+    void refresh().then((result) => {
+      if (active) applyProbeResults(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, [refresh, applyProbeResults]);
 
   return (
     <main className="min-h-screen bg-black px-5 py-8 text-white md:px-8">
@@ -231,7 +259,7 @@ export default function PlatformHubPage() {
           </div>
           <button
             type="button"
-            onClick={() => void refresh()}
+            onClick={() => void refresh().then(applyProbeResults)}
             className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/15 px-4 py-2 text-sm text-slate-200 transition hover:border-cyan-400/50 hover:text-white"
           >
             <RefreshCw className="h-4 w-4" />
