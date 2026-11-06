@@ -166,9 +166,6 @@ export default function PlatformHubPage() {
   const [checkedAt, setCheckedAt] = useState<string>("");
 
   const refresh = useCallback(async () => {
-    setHealth({ status: "checking", detail: "Checking API health…" });
-    setReadiness({ status: "checking", detail: "Checking database, cache and runtime…" });
-
     try {
       const response = await fetch("/health", {
         cache: "no-store",
