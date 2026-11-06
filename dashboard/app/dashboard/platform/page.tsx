@@ -43,6 +43,14 @@ const modules = [
     state: "Available",
   },
   {
+    name: "Runtime tasks",
+    description: "Submit, inspect and cancel authenticated agent runtime tasks.",
+    href: "/dashboard/runtime",
+    icon: Workflow,
+    phase: "Phase 2",
+    state: "Available",
+  },
+  {
     name: "Evidence & audit",
     description: "Inspect security evidence, integrity commitments and audit records.",
     href: "/dashboard/evidence",
