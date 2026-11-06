@@ -41,6 +41,8 @@ export default function RuntimePage() {
   const [task, setTask] = useState<RuntimeTask | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [sessionBusy, setSessionBusy] = useState(false);
 
   async function submitTask() {
     let payload: unknown;
@@ -114,6 +116,42 @@ export default function RuntimePage() {
       setMessage(error instanceof Error ? error.message : "Unable to cancel task.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function createSession() {
+    setSessionBusy(true);
+    setMessage("");
+    try {
+      const result = await readResponse<{ session_id: string; trace_id: string }>(
+        await apiFetch("/api/runtime/sessions", { method: "POST" }),
+      );
+      setSessionId(result.session_id);
+      setMessage(`Runtime session created. Trace: ${result.trace_id}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to create runtime session.");
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function closeSession() {
+    const id = sessionId.trim();
+    if (!id) return;
+    setSessionBusy(true);
+    setMessage("");
+    try {
+      await readResponse<{ status: string; session_id: string }>(
+        await apiFetch(`/api/runtime/sessions/${encodeURIComponent(id)}/close`, {
+          method: "POST",
+        }),
+      );
+      setSessionId("");
+      setMessage("Runtime session closed.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to close runtime session.");
+    } finally {
+      setSessionBusy(false);
     }
   }
 
@@ -268,10 +306,46 @@ export default function RuntimePage() {
             )}
           </div>
         </section>
+        <section className="rounded-xl border border-white/10 bg-white/[0.025] p-5">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-cyan-300" />
+            <h2 className="font-semibold">Runtime session lifecycle</h2>
+          </div>
+          <p className="mt-2 text-sm text-slate-400">
+            Create a session for the authenticated agent, then close it when its work is complete.
+            Session identifiers are scoped and ownership-checked by the backend.
+          </p>
+          {sessionId && (
+            <p className="mt-4 break-all rounded-lg border border-white/10 bg-black/50 p-3 font-mono text-xs text-slate-200">
+              {sessionId}
+            </p>
+          )}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={sessionBusy || Boolean(sessionId)}
+              onClick={() => void createSession()}
+              className="rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
+            >
+              Create session
+            </button>
+            <button
+              type="button"
+              disabled={sessionBusy || !sessionId}
+              onClick={() => void closeSession()}
+              className="rounded-lg border border-rose-500/30 px-4 py-2 text-sm text-rose-300 disabled:opacity-40"
+            >
+              Close session
+            </button>
+          </div>
+        </section>
+
         <p className="text-xs leading-5 text-slate-500">
           Task submission requires a valid authenticated agent with the runtime
           invocation capability. A task may be accepted but not execute if no
-          compatible worker or handler is available.
+          compatible worker or handler is available. Session creation and closure
+          are also authenticated runtime operations; this UI does not fabricate
+          session state.
         </p>
       </div>
     </main>
